@@ -1,0 +1,19 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+      # pnpm is only needed by the pack test in verify/package.test.mjs
+      - run: npm install -g pnpm
+      - run: npm run deps:ci
+      - run: npm test

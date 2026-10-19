@@ -30,11 +30,10 @@
 > [!WARNING]
 > 安装会修改当前 profile 的 `package.json` 和 lock 文件，需要授予完整权限。建议先在一个可以随时丢弃的测试 profile 中试用。
 
-1. 获取安装包，以下任选其一：
-   - npm 包 `dsh-followup-prompt`（发布后可用）；
-   - 在本仓库执行 `pnpm pack`，得到 `dsh-followup-prompt-<version>.tgz`。
-2. 在 Harness 中让 agent 调用 `plugin_manager` → `install_bundle`，`target` 填写 `.tgz` 文件的**绝对路径**或 npm 包名。
-3. 刷新页面。
+1. 在 Harness 中让 agent 调用 `plugin_manager` → `install_bundle`，`target` 填写以下任意一种：
+   - npm 包名 `dsh-followup-prompt`（推荐）；
+   - `.tgz` 文件的**绝对路径**。`.tgz` 可以从 [GitHub Releases](https://github.com/keliwang/dsh-followup-prompt/releases) 下载，也可以在本仓库执行 `pnpm pack` 生成。
+2. 刷新页面。
 
 > [!NOTE]
 > 请通过 `.tgz` 或 npm 包安装，不要直接安装源码目录。目录安装时插件找不到 Harness 自带的依赖，会加载失败。

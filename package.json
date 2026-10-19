@@ -12,6 +12,15 @@
     "followup-prompt"
   ],
   "license": "MIT",
+  "author": "Keli",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/keliwang/dsh-followup-prompt.git"
+  },
+  "homepage": "https://github.com/keliwang/dsh-followup-prompt#readme",
+  "bugs": {
+    "url": "https://github.com/keliwang/dsh-followup-prompt/issues"
+  },
   "type": "module",
   "exports": {
     ".": "./host/index.js",
@@ -33,7 +42,9 @@
   "scripts": {
     "test": "node --test \"verify/*.test.mjs\"",
     "pack:dry": "pnpm pack --dry-run",
-    "links": "node scripts/link-dev-deps.mjs"
+    "links": "node scripts/link-dev-deps.mjs",
+    "deps:ci": "npm install --no-save --no-audit --no-fund @deepseek-ai/schemastery@3 @deepseek-ai/dsh-llm@0.2.1-rc.2",
+    "prepublishOnly": "npm test"
   },
   "peerDependencies": {
     "@deepseek-ai/dsh-llm": "*",

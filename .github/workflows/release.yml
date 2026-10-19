@@ -1,0 +1,45 @@
+# Push a vX.Y.Z tag (`npm version patch && git push --follow-tags`) to publish to npm
+# and create the matching GitHub release. A tag with a `-` suffix (v0.2.0-rc.1) is a
+# prerelease: npm dist-tag `next`, GitHub release marked as prerelease.
+
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write # gh release create
+  id-token: write # npm trusted publishing (OIDC) and provenance
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+      # Trusted publishing needs npm >= 11.5.1; pnpm is only needed by the pack test.
+      - run: npm install -g npm@latest pnpm
+
+      - name: Check the tag matches package.json
+        run: test "v$(node -p 'require("./package.json").version')" = "$GITHUB_REF_NAME"
+
+      - run: npm run deps:ci
+      - run: npm test
+
+      - name: Publish to npm
+        run: |
+          if [[ "$GITHUB_REF_NAME" == *-* ]]; then npm publish --tag next; else npm publish; fi
+
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          npm pack
+          flags=()
+          if [[ "$GITHUB_REF_NAME" == *-* ]]; then flags+=(--prerelease); fi
+          gh release create "$GITHUB_REF_NAME" dsh-followup-prompt-*.tgz \
+            --title "$GITHUB_REF_NAME" --generate-notes --verify-tag "${flags[@]}"
