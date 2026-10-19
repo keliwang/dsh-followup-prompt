@@ -16,13 +16,13 @@
 |---|---|
 | 包结构与清单（package.json / patch / locale / icon / files / exports） | ✅ 已完成 |
 | Host 半边（触发、继承式一次性调用、tool-rejection、缓存、RPC 通道、Config） | ✅ 骨架实现完成 |
-| Client 半边（`conversation.input.dock` 建议条（输入框上方）、Tab/点击接受、IME、i18n、静默失败） | ✅ 实现完成 |
+| Client 半边（`conversation.input.overlay` 内联 ghost（输入框内）、Tab 接受、IME、i18n、静默失败） | ✅ 实现完成 |
 | 离线验证（语法、清单、manifest、桩驱动冒烟、pack 文件清单） | ✅ `npm test`（32 项检查；Host 冒烟 33 条、Client 冒烟 40 条断言） |
 | 安装到真实 profile（Desktop，2026-10-19） | ✅ `application: applied`，无 warnings；Host row `active` |
 | Host 真机生成（真实 LLM 建议 + dismiss） | ✅ 已通过（见下文「真机验收记录」） |
-| Client 真机注册（input.dock occupant） | ✅ `followup-prompt` order 100 `active`（输入框上方） |
+| Client 真机注册（input.overlay occupant） | ✅ `followup-prompt` order 100 `active`（输入框内 ghost） |
 | 真机 UI 人工交互（Tab/IME/视觉版式/前缀缓存 A/B） | ⬜ 待人工验证（方案 §7.2 #3–#7、§7.5） |
-| 内联 ghost 样式（`conversation.input.overlay`，P2） | ⬜ 未实现，v1 固定用输入框上方建议条 |
+| 内联 ghost 样式（`conversation.input.overlay`，P2） | ✅ 已实现：按真实编辑器矩形/字体对齐，显示期间隐藏原生 placeholder |
 | 自查设置页（`settings.section`，P2） | ⬜ 未实现，v1 用 Settings 自动表单 / patch |
 
 > 本仓库当前是**已安装、Host/Client 已真机打通**的 v0.1 骨架：离线检查证明装配与契约，真机验收证明
@@ -58,7 +58,7 @@ pnpm pack                 # 产出 dsh-followup-prompt-0.1.0.tgz
 安装后：
 
 1. `cordis_inspect_query` 的 `Config.listConfigs({name:'dsh-followup-prompt'})` 出现 Host 行 = 已激活；
-2. 刷新页面后 `Slots.listSubTree` 能看到本插件在 `conversation.input.dock`（输入框上方）的注册；
+2. 刷新页面后 `Slots.listSubTree` 能看到本插件在 `conversation.input.overlay`（输入框内浮层）的注册；
 3. 按「快速验证」走一遍。
 
 > 用 `.tgz`（真实目录）而不是本地目录：本地目录安装是 pnpm `link:`，Host 代码会从 workspace 解析
@@ -77,10 +77,10 @@ pnpm pack                 # 产出 dsh-followup-prompt-0.1.0.tgz
 ## 快速验证（安装后）
 
 1. 发一个问题，等回答结束（输入框为空、焦点在 composer）。
-2. 输入框下方出现一条「预测 / Prediction」建议条；没有建议也不报错（provider 失败会静默）。
-3. 按 **Tab**：建议文本进入输入框成为草稿；**不发送**；可继续编辑；`Cmd/Ctrl+Z` 一次撤销（走 `insertText` 时）。
+2. 空输入框内出现灰色 ghost 文本（原 placeholder 位置），右侧有 `Tab 接受` 提示；没有建议也不报错（provider 失败会静默）。
+3. 按 **Tab**：ghost 文本进入输入框成为草稿；**不发送**；可继续编辑；`Cmd/Ctrl+Z` 一次撤销（走 `insertText` 时）。
 4. 继续打字 / 切换会话 / 中文输入法组合输入：建议隐藏或作废，输入不受影响。
-5. 点 × 或 Esc：本次建议消失，且同一回合不再出现。
+5. 点右侧 × 或 Esc：本次建议消失，且同一回合不再出现。
 
 完整真机清单（14 项）见方案 §7.2。
 
@@ -125,7 +125,7 @@ Host `Config`（schemastery，全部字段 `.volatile()`）会在 **Settings →
 
 ```
 Host（Node）                                    Client（Web）
-session/event → turn/end(completed)             conversation.input.dock 建议条（输入框上方）
+session/event → turn/end(completed)             conversation.input.overlay 内联 ghost（输入框内）
   → 继承式一次性 ctx.llm.stream                  ← 长轮询 suggestions/wait ←
   → 归一化 + 内存缓存                              Tab/点击 → inputActions 写入草稿（不发送）
   → POST /api/followup-prompt/rpc                  → suggestions/dismiss
@@ -205,7 +205,7 @@ dsh-followup-prompt/
 |---|---|---|
 | 1 | `plugin_manager install_bundle`（`.tgz` 真实安装） | `application: applied`，`warnings: []` |
 | 2 | Host Loader row 激活 | `include:followup-prompt` → `fiberPhase: active`；`Config.listConfigs` 有 schema |
-| 3 | Client slot 注册 | `conversation.input.dock`（输入框上方）occupants: `followup-prompt` order 100 `active: true` |
+| 3 | Client slot 注册 | `conversation.input.overlay`（输入框内 ghost）occupants: `followup-prompt` order 100 `active: true` |
 | 4 | 鉴权传输 | 用浏览器 cookie 调 `POST /api/followup-prompt/rpc`：坏请求→`followup-prompt/bad-request`、未知 endpoint→`followup-prompt/bad-endpoint`、未知会话→`unknown-session` |
 | 5 | **真实 LLM 预测** | 临时会话（已归档）第 2 回合：`{"suggestion":"先聊聊测试覆盖率和 CI 流程吧","turn":2}` |
 | 6 | dismiss 语义 | `suggestions/dismiss` 后再次 wait → `{suggestion:null,reason:"stale"}` |
@@ -228,7 +228,7 @@ dsh-followup-prompt/
 
 ## 已知限制
 
-- v1 只有输入框上方建议条，没有 Codex 风格的内联 ghost；ghost 见方案 §5.3 P2。
+- 内联 ghost 依赖 0.2.1 的 `[data-composer-input]` / `[data-composer-placeholder]` 结构与版式，升级后需按方案 §7.4 回归；若版式对不齐，可降级为 `conversation.input.dock` 的上方建议条（保留在方案 §5.3）。
 - 预测请求会计费；无官方 moderation / 审计事件 / 正式遥测。
 - `/api` exact Fetch 路由属于 DSH 内部契约（非 stable 公开 API）；Client 侧的 slot props / `data-composer-input`
   属于 0.2.1 实现细节，升级后按方案 §7.4 回归；出问题可用 `enabled=false` 立即关闭。

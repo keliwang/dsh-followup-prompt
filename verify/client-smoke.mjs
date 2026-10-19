@@ -452,11 +452,11 @@ check('locale dictionaries registered under the plugin namespace', () => {
   assert.equal(typeof dictionaries.zh['prediction.acceptHint'], 'string')
   return 'en + zh (meta.title/prediction.*)'
 })
-check('the composer input dock slot is injected, then registered', () => {
-  assert.deepEqual(slotInjections, ['conversation.input.dock'])
+check('the composer input overlay slot is injected, then registered', () => {
+  assert.deepEqual(slotInjections, ['conversation.input.overlay'])
   assert.equal(registrations.length, 1)
   const { options } = registrations[0]
-  assert.equal(options.name, 'conversation.input.dock')
+  assert.equal(options.name, 'conversation.input.overlay')
   assert.equal(options.id, 'followup-prompt')
   assert.equal(options.locale, 'followup-prompt')
   assert.equal(typeof options.order, 'number')
@@ -675,7 +675,7 @@ const defaultRpc = {
 
 console.log('\n[4/5] component state machine and Tab accept (fake hook runtime)')
 
-await checkAsync('idle edge requests once and mounts the bar', async () => {
+await checkAsync('idle edge requests once and mounts the inline ghost', async () => {
   fetchCalls.length = 0
   fetchHandler = async () => jsonResponse({ ok: true, value: { suggestion: 'hello there', turn: 7 } })
   const state = makeComponentState()
@@ -687,11 +687,12 @@ await checkAsync('idle edge requests once and mounts the bar', async () => {
   assert.equal(element.props.role, 'status')
   assert.equal(element.props['aria-live'], 'polite')
   assert.equal(element.props['data-followup-prompt'], '')
-  assert.ok(String(element.props.style.maxWidth).includes('--dsh-composer-card-max-width'))
-  assert.ok(String(element.props.style.background).includes('--dsw-alias-bg-layer-1'))
+  assert.equal(element.props.style.position, 'absolute')
+  assert.equal(element.props.style.pointerEvents, 'none')
+  assert.ok(Number(element.props.style.zIndex) >= 1)
   assert.ok(textOf(element).includes('hello there'))
-  assert.ok(textOf(element).includes('t:prediction.prefix'))
   assert.ok(textOf(element).includes('Tab'))
+  assert.ok(textOf(element).includes('t:prediction.acceptHint'))
   assert.equal(waitCallCount(), 1)
   assert.equal(actions.calls.captureInsertion, 0)
   assert.equal(actions.calls.submit, 0)
@@ -1000,7 +1001,7 @@ check('only shipped theme alias tokens are referenced', () => {
   const unknown = [...used].filter(token => !allowed.has(token) && !token.startsWith('--dsw-radius-'))
   assert.deepEqual(unknown, [])
   assert.ok(used.has('--dsw-alias-bg-layer-1'))
-  assert.ok(used.has('--dsw-alias-border-l2'))
+  assert.ok(used.has('--dsw-alias-border-l1'))
   return `${used.size} token(s), all shipped`
 })
 

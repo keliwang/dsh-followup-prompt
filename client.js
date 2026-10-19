@@ -2,17 +2,18 @@
  * Followup Prompt — Client (browser) half of the `dsh-followup-prompt` bundle.
  *
  * Lazy-CJS plugin loaded through `window.__ModuleLoader__` (no bundler, no JSX):
- * the browser module table hands us React, and we contribute one ambient
- * suggestion bar to the `conversation.input.dock` slot. The bar shows the
- * next-user-message prediction the Host generated for the latest completed
- * turn; Tab (or a click) accepts it into the composer as an editable draft.
- * It never sends, and every failure/state change degrades to "render nothing".
+ * the browser module table hands us React, and we contribute one inline ghost
+ * inside the composer card through the `conversation.input.overlay` slot. The
+ * ghost renders the next-user-message prediction the Host generated for the
+ * latest completed turn where the empty draft's placeholder would be; Tab
+ * accepts it into the composer as an editable draft. It never sends, and
+ * every failure/state change degrades to "render nothing".
  *
  * Contract sources verified against DSH 0.2.1-rc.2:
  * - module registration: packages/client/modules/src/client/manifest.ts
  * - slots: packages/client/ui-slots/src/index.ts + ui-renderer/src/client/registry.ts
- *   (`conversation.input.dock` is a session-scope list slot declared by
- *   ui-conversation; third-party entries register via ctx.slots.inject/register)
+ *   (`conversation.input.overlay` is a floating session-scope list slot inside
+ *   the composer card; third-party entries register via ctx.slots.inject/register)
  * - standard props: ui-conversation contract/slots.ts (SessionStandardProps),
  *   ui-session client/index.ts (sessionId/useSession), contract/input.ts
  *   (`InputActions.captureInsertion/insertText/setDraft`, `InputState`)
@@ -26,7 +27,10 @@
  *   profile bundles cannot inject the `webServer` service it requires.
  * - locale: packages/client/locale/src/client/index.ts (`ctx.locale.register`)
  * - editor DOM gate: the composer editor host component sets `data-composer-input`;
- *   keymap.ts sets `data-composer-composing`.
+ *   keymap.ts sets `data-composer-composing`. The inline ghost measures that
+ *   element (rect + computed font/padding) so it sits exactly where typed text
+ *   starts, and temporarily hides `[data-composer-placeholder]` while shown
+ *   (restoring it on hide/unmount), following the plan's P2 calibration note.
  *
  * Never calls `inputActions` submission; only captureInsertion/insertText/setDraft.
  */
@@ -38,16 +42,37 @@ window.__ModuleLoader__.load({
 
     /** Locale namespace / loader row identity / slot identity. */
     const NS = 'followup-prompt'
-    const SLOT = 'conversation.input.dock'
+    const SLOT = 'conversation.input.overlay'
     const SLOT_ID = 'followup-prompt'
-    /** After ui-chat's activity (0) and usage (1) pills; additive list order. */
+    /** Last in the overlay's additive order (menus use 0). */
     const SLOT_ORDER = 100
     /** Client-side safety net; the Host bounds its own long poll well below this. */
     const REQUEST_TIMEOUT_MS = 20000
     /** Safari can emit the closing keydown after compositionend; keep the gate briefly. */
     const COMPOSITION_GRACE_MS = 10
-    /** The composer editor host's published DOM attribute (the accept gate). */
+    /** The composer editor host's published DOM attributes (accept + alignment gates). */
     const COMPOSER_INPUT_SELECTOR = '[data-composer-input]'
+    const COMPOSER_CARD_SELECTOR = '[data-composer-card]'
+    const COMPOSER_PLACEHOLDER_SELECTOR = '[data-composer-placeholder]'
+    /** Ghost geometry before the first real measurement (card-relative px). */
+    const DEFAULT_GHOST_LAYOUT = Object.freeze({
+      ready: false,
+      top: 12,
+      left: 14,
+      width: 0,
+      fontFamily: 'inherit',
+      fontSize: '14px',
+      lineHeight: '22px',
+      fontWeight: '400',
+      fontStyle: 'normal',
+      letterSpacing: 'normal',
+    })
+    /** Room reserved for the Tab hint + close button at the ghost line's right. */
+    const GHOST_HINT_RESERVE_PX = 118
+    /** Layout effects must run before paint; fall back on React builds without one. */
+    const useIsoLayoutEffect = typeof React.useLayoutEffect === 'function'
+      ? React.useLayoutEffect
+      : React.useEffect
 
     // ── Dictionaries ────────────────────────────────────────────────────────
     // Flat `{ key: text }` maps; the locale plugin resolves them per active
@@ -77,59 +102,40 @@ window.__ModuleLoader__.load({
     // ui-theme's token catalog) plus layout-neutral fallbacks; light and dark
     // both resolve through the theme, so no palette color is hard-coded.
     const styles = {
-      bar: {
-        boxSizing: 'border-box',
-        display: 'flex',
-        alignItems: 'center',
-        gap: '8px',
-        flex: '1 1 auto',
-        minWidth: 0,
+      // Zero-height overlay host anchored at the composer card's top-left. The
+      // real position comes from `measureGhostLayout`; children are
+      // click-through except the tiny close button so typing/carets still work.
+      root: {
+        position: 'absolute',
+        top: 0,
+        left: 0,
         width: '100%',
-        maxWidth: 'var(--dsh-composer-card-max-width, 952px)',
-        margin: '0 auto 6px',
-        padding: '4px 6px 4px 10px',
-        borderRadius: 'var(--dsw-radius-md, 10px)',
-        border: '1px solid var(--dsw-alias-border-l1, rgba(127, 127, 127, 0.18))',
-        background: 'var(--dsw-alias-bg-layer-1, rgba(127, 127, 127, 0.08))',
-        color: 'var(--dsw-alias-label-secondary, currentColor)',
-        fontFamily: 'inherit',
-        fontSize: '12px',
-        lineHeight: '18px',
+        height: 0,
+        pointerEvents: 'none',
+        zIndex: 2,
       },
-      glyph: {
-        flex: 'none',
-        display: 'inline-flex',
-        alignItems: 'center',
-        color: 'var(--dsw-alias-brand-primary, currentColor)',
-        fontSize: '13px',
-        lineHeight: '18px',
-      },
-      prefix: {
-        flex: 'none',
-        fontWeight: '500',
-        color: 'var(--dsw-alias-label-secondary, currentColor)',
-      },
-      accept: {
-        flex: '1 1 auto',
-        minWidth: 0,
+      ghost: {
+        position: 'absolute',
+        boxSizing: 'border-box',
+        whiteSpace: 'nowrap',
         overflow: 'hidden',
         textOverflow: 'ellipsis',
-        whiteSpace: 'nowrap',
-        margin: 0,
-        padding: 0,
-        border: 'none',
-        background: 'transparent',
-        color: 'var(--dsw-alias-label-primary, currentColor)',
-        font: 'inherit',
-        textAlign: 'left',
-        cursor: 'pointer',
+        pointerEvents: 'none',
+        userSelect: 'none',
+        opacity: 0.58,
+        color: 'var(--dsw-alias-label-secondary, currentColor)',
       },
       hint: {
-        flex: 'none',
+        position: 'absolute',
         display: 'inline-flex',
         alignItems: 'center',
-        gap: '4px',
+        gap: '6px',
+        pointerEvents: 'none',
         color: 'var(--dsw-alias-label-secondary, currentColor)',
+        fontFamily: 'inherit',
+        fontSize: '11px',
+        lineHeight: '16px',
+        whiteSpace: 'nowrap',
       },
       kbd: {
         fontFamily: 'inherit',
@@ -137,41 +143,39 @@ window.__ModuleLoader__.load({
         lineHeight: '16px',
         padding: '0 5px',
         borderRadius: '5px',
-        border: '1px solid var(--dsw-alias-border-l2, rgba(127, 127, 127, 0.28))',
+        border: '1px solid var(--dsw-alias-border-l1, rgba(127, 127, 127, 0.18))',
         background: 'var(--dsw-alias-bg-layer-1, rgba(127, 127, 127, 0.08))',
         color: 'var(--dsw-alias-label-secondary, currentColor)',
       },
       close: {
-        flex: 'none',
         display: 'inline-flex',
         alignItems: 'center',
         justifyContent: 'center',
-        width: '22px',
-        height: '22px',
+        width: '18px',
+        height: '18px',
         padding: 0,
         border: 'none',
         borderRadius: '999px',
         background: 'transparent',
         color: 'var(--dsw-alias-label-secondary, currentColor)',
         font: 'inherit',
-        fontSize: '15px',
+        fontSize: '13px',
         lineHeight: '1',
         cursor: 'pointer',
+        pointerEvents: 'auto',
       },
     }
 
     const CSS_TEXT = [
       '[data-followup-prompt] button { font-family: inherit; }',
-      '[data-followup-prompt] .fup-accept:hover { color: var(--dsw-alias-brand-primary, currentColor); }',
       '[data-followup-prompt] .fup-close:hover {',
       '  color: var(--dsw-alias-label-primary, currentColor);',
       '  background: var(--dsw-alias-bg-layer-1, rgba(127, 127, 127, 0.10));',
       '}',
-      '[data-followup-prompt] .fup-accept:focus-visible,',
       '[data-followup-prompt] .fup-close:focus-visible { outline-offset: 1px; }',
-      '@keyframes fup-fade-in { from { opacity: 0; transform: translateY(2px); } to { opacity: 1; transform: none; } }',
+      '@keyframes fup-fade-in { from { opacity: 0; } to { opacity: 1; } }',
       '@media (prefers-reduced-motion: no-preference) {',
-      '  [data-followup-prompt] { animation: fup-fade-in 140ms ease-out; }',
+      '  [data-followup-prompt] { animation: fup-fade-in 120ms ease-out; }',
       '}',
     ].join('\n')
 
@@ -245,9 +249,10 @@ window.__ModuleLoader__.load({
 
     // ── Template class (re-created per render; hook order is fixed) ─────────
     /**
-     * Suggested next message bar, mounted as one list entry inside
-     * `conversation.input.dock` (the full-width row above the composer card)
-     * for the current Session.
+     * Inline next-message ghost, mounted as one floating entry inside
+     * `conversation.input.overlay` for the current Session. It is positioned at
+     * the real editor origin and visually replaces the empty draft's
+     * placeholder, so it reads as typed-but-not-yet-committed text.
      *
      * Standard props consumed: sessionId, useSession, useInput, inputActions, t.
      * Injected props consumed: waitForSuggestion, dismissSuggestion,
@@ -273,6 +278,10 @@ window.__ModuleLoader__.load({
       const [suggestion, setSuggestion] = React.useState(null)
       const [turn, setTurn] = React.useState(null)
       const [composing, setComposing] = React.useState(false)
+      /** Measured editor geometry for the inline ghost (card-relative px). */
+      const [ghostLayout, setGhostLayout] = React.useState(DEFAULT_GHOST_LAYOUT)
+      /** Ghost overlay host, used to find the composer card and return focus. */
+      const ghostRootRef = React.useRef(null)
 
       /** Generation token: bumped on abort, so stale responses are dropped. */
       const generationRef = React.useRef(0)
@@ -309,6 +318,86 @@ window.__ModuleLoader__.load({
         && attachmentCount === 0
       const visible = suggestion !== null && eligible && composing === false
       eligibleRef.current = eligible
+
+      /**
+       * Measure the composer card and its editor, then store card-relative
+       * geometry for the ghost: the editable element's real text origin,
+       * available width, and the editor's computed font. Defensive on every
+       * DOM capability so a test renderer or a future layout change degrades to
+       * the default geometry instead of throwing.
+       * @returns {void}
+       */
+      function measureGhostLayout() {
+        if (typeof document === 'undefined') return
+        const root = ghostRootRef.current
+        if (root === null || root === undefined) return
+        let card = null
+        try {
+          if (typeof root.closest === 'function') card = root.closest(COMPOSER_CARD_SELECTOR)
+          if (card === null && typeof document.querySelector === 'function') {
+            card = document.querySelector(COMPOSER_CARD_SELECTOR)
+          }
+        } catch (error) {
+          card = null
+        }
+        if (card === null || card === undefined || typeof card.querySelector !== 'function') return
+        let input = null
+        try {
+          input = card.querySelector(COMPOSER_INPUT_SELECTOR)
+        } catch (error) {
+          input = null
+        }
+        if (input === null || typeof input.getBoundingClientRect !== 'function'
+          || typeof card.getBoundingClientRect !== 'function') return
+        let cardRect
+        let inputRect
+        try {
+          cardRect = card.getBoundingClientRect()
+          inputRect = input.getBoundingClientRect()
+        } catch (error) {
+          return
+        }
+        if (cardRect === null || inputRect === null) return
+        if (typeof inputRect.width !== 'number' || !(inputRect.width > 0)) return
+        let computed = null
+        try {
+          computed = typeof getComputedStyle === 'function' ? getComputedStyle(input) : null
+        } catch (error) {
+          computed = null
+        }
+        const toPx = (value, fallback) => {
+          const parsed = Number.parseFloat(value)
+          return Number.isFinite(parsed) ? parsed : fallback
+        }
+        const paddingLeft = computed === null ? 14 : toPx(computed.paddingLeft, 14)
+        const paddingRight = computed === null ? 8 : toPx(computed.paddingRight, 8)
+        const paddingTop = computed === null ? 4 : toPx(computed.paddingTop, 4)
+        const next = {
+          ready: true,
+          top: inputRect.top - cardRect.top + paddingTop,
+          left: inputRect.left - cardRect.left + paddingLeft,
+          width: Math.max(0, inputRect.width - paddingLeft - paddingRight - 4),
+          fontFamily: (computed === null ? '' : computed.fontFamily) || 'inherit',
+          fontSize: (computed === null ? '' : computed.fontSize) || 'inherit',
+          lineHeight: (computed === null ? '' : computed.lineHeight) || '22px',
+          fontWeight: (computed === null ? '' : computed.fontWeight) || '400',
+          fontStyle: (computed === null ? '' : computed.fontStyle) || 'normal',
+          letterSpacing: (computed === null ? '' : computed.letterSpacing) || 'normal',
+        }
+        setGhostLayout(function keepStableLayout(previous) {
+          const same = previous.ready === true
+            && Math.abs(previous.top - next.top) < 0.5
+            && Math.abs(previous.left - next.left) < 0.5
+            && Math.abs(previous.width - next.width) < 0.5
+            && previous.fontFamily === next.fontFamily
+            && previous.fontSize === next.fontSize
+            && previous.lineHeight === next.lineHeight
+            && previous.fontWeight === next.fontWeight
+            && previous.fontStyle === next.fontStyle
+            && previous.letterSpacing === next.letterSpacing
+          return same ? previous : next
+        })
+      }
 
       // ── Request machinery ───────────────────────────────────────────────
       function cancelInFlight() {
@@ -557,6 +646,91 @@ window.__ModuleLoader__.load({
         })
       })
 
+      // ── Inline ghost placement: measure before paint + follow resizes ────
+      useIsoLayoutEffect(function placeInlineGhost() {
+        if (!visible) return undefined
+        measureGhostLayout()
+        if (typeof window === 'undefined' || typeof window.addEventListener !== 'function') return undefined
+        let frame = null
+        const schedule = function scheduleMeasure() {
+          if (frame !== null) return
+          if (typeof requestAnimationFrame === 'function') {
+            frame = requestAnimationFrame(function remeasure() {
+              frame = null
+              measureGhostLayout()
+            })
+          } else {
+            frame = setTimeout(function remeasureLater() {
+              frame = null
+              measureGhostLayout()
+            }, 16)
+          }
+        }
+        window.addEventListener('resize', schedule)
+        let observer = null
+        try {
+          if (typeof ResizeObserver === 'function' && ghostRootRef.current !== null) {
+            const root = ghostRootRef.current
+            const card = typeof root.closest === 'function'
+              ? root.closest(COMPOSER_CARD_SELECTOR)
+              : null
+            if (card !== null) {
+              observer = new ResizeObserver(schedule)
+              observer.observe(card)
+            }
+          }
+        } catch (error) {
+          observer = null
+        }
+        return function cleanupPlacement() {
+          window.removeEventListener('resize', schedule)
+          if (frame !== null) {
+            try {
+              if (typeof cancelAnimationFrame === 'function') cancelAnimationFrame(frame)
+              else clearTimeout(frame)
+            } catch (error) {
+              /* ignore */
+            }
+            frame = null
+          }
+          if (observer !== null) {
+            try {
+              observer.disconnect()
+            } catch (error) {
+              /* ignore */
+            }
+          }
+        }
+      }, [visible, sessionId])
+
+      // The ghost stands where the native placeholder would be; hide that
+      // placeholder while shown and restore its inline value on hide/unmount.
+      React.useEffect(function hideNativePlaceholder() {
+        if (!visible || typeof document === 'undefined') return undefined
+        let placeholder = null
+        try {
+          const root = ghostRootRef.current
+          let card = root !== null && typeof root !== 'undefined' && typeof root.closest === 'function'
+            ? root.closest(COMPOSER_CARD_SELECTOR)
+            : null
+          if (card === null && typeof document.querySelector === 'function') {
+            card = document.querySelector(COMPOSER_CARD_SELECTOR)
+          }
+          placeholder = card !== null && typeof card.querySelector === 'function'
+            ? card.querySelector(COMPOSER_PLACEHOLDER_SELECTOR)
+            : null
+        } catch (error) {
+          placeholder = null
+        }
+        if (placeholder === null || placeholder === undefined || placeholder.style === undefined) return undefined
+        const target = placeholder.style
+        const previous = target.visibility
+        target.visibility = 'hidden'
+        return function restoreNativePlaceholder() {
+          target.visibility = previous
+        }
+      }, [visible, sessionId])
+
       // ── Unmount: never leave a transport request alive ───────────────────
       React.useEffect(function stopOnUnmount() {
         return function cleanupRequests() {
@@ -566,16 +740,6 @@ window.__ModuleLoader__.load({
 
       if (!visible) return null
       const translate = typeof t === 'function' ? t : identityTranslate
-      function onAcceptClick(event) {
-        if (event !== null && event !== undefined && typeof event.preventDefault === 'function') {
-          try {
-            event.preventDefault()
-          } catch (error) {
-            /* ignore */
-          }
-        }
-        accept()
-      }
       function onCloseClick(event) {
         if (event !== null && event !== undefined && typeof event.preventDefault === 'function') {
           try {
@@ -586,41 +750,50 @@ window.__ModuleLoader__.load({
         }
         close()
       }
+      const lineHeight = ghostLayout.ready ? ghostLayout.lineHeight : DEFAULT_GHOST_LAYOUT.lineHeight
+      const ghostTop = ghostLayout.ready ? ghostLayout.top : DEFAULT_GHOST_LAYOUT.top
+      const ghostLeft = ghostLayout.ready ? ghostLayout.left : DEFAULT_GHOST_LAYOUT.left
+      const ghostWidth = ghostLayout.ready
+        ? Math.max(24, ghostLayout.width - GHOST_HINT_RESERVE_PX)
+        : undefined
+      const ghostStyle = {
+        ...styles.ghost,
+        top: ghostTop,
+        left: ghostLeft,
+        width: ghostWidth === undefined ? 'calc(100% - 150px)' : ghostWidth,
+        lineHeight,
+        fontFamily: ghostLayout.fontFamily,
+        fontSize: ghostLayout.fontSize,
+        fontWeight: ghostLayout.fontWeight,
+        fontStyle: ghostLayout.fontStyle,
+        letterSpacing: ghostLayout.letterSpacing,
+      }
+      const hintStyle = { ...styles.hint, top: ghostTop, right: 8, height: lineHeight }
       return h('div', {
         key: 'followup-prompt',
+        ref: ghostRootRef,
         role: 'status',
         'aria-live': 'polite',
         'aria-label': translate('prediction.statusAria'),
         'data-followup-prompt': '',
-        style: styles.bar,
+        style: styles.root,
       },
         h('style', { key: 'styles' }, CSS_TEXT),
-        h('span', { key: 'glyph', style: styles.glyph, 'aria-hidden': 'true' }, '\u2726'),
-        h('span', { key: 'prefix', style: styles.prefix }, translate('prediction.prefix')),
-        h('button', {
-          key: 'accept',
-          type: 'button',
-          className: 'fup-accept',
-          style: styles.accept,
-          title: translate('prediction.acceptAria'),
-          'aria-label': translate('prediction.acceptAria'),
-          onMouseDown: preventFocusLoss,
-          onClick: onAcceptClick,
-        }, suggestion),
-        h('span', { key: 'hint', style: styles.hint },
+        h('span', { key: 'ghost', 'aria-hidden': 'true', style: ghostStyle }, suggestion),
+        h('span', { key: 'hint', style: hintStyle },
           h('kbd', { key: 'kbd', style: styles.kbd }, 'Tab'),
           h('span', { key: 'hintText' }, translate('prediction.acceptHint')),
+          h('button', {
+            key: 'close',
+            type: 'button',
+            className: 'fup-close',
+            style: styles.close,
+            title: translate('prediction.dismissAria'),
+            'aria-label': translate('prediction.dismissAria'),
+            onMouseDown: preventFocusLoss,
+            onClick: onCloseClick,
+          }, '\u00d7'),
         ),
-        h('button', {
-          key: 'close',
-          type: 'button',
-          className: 'fup-close',
-          style: styles.close,
-          title: translate('prediction.dismissAria'),
-          'aria-label': translate('prediction.dismissAria'),
-          onMouseDown: preventFocusLoss,
-          onClick: onCloseClick,
-        }, '\u00d7'),
       )
     }
 
