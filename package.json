@@ -26,6 +26,7 @@
     "cordis.patch.yml",
     "locale/*.json",
     "icon.svg",
+    "docs/",
     "README.md",
     "LICENSE"
   ],

@@ -17,7 +17,7 @@
 | 包结构与清单（package.json / patch / locale / icon / files / exports） | ✅ 已完成 |
 | Host 半边（触发、继承式一次性调用、tool-rejection、缓存、RPC 通道、Config） | ✅ 骨架实现完成 |
 | Client 半边（`conversation.composer.dock` 建议条、Tab/点击接受、IME、i18n、静默失败） | ✅ 骨架实现完成 |
-| 离线验证（语法、清单、manifest、桩驱动冒烟、pack 文件清单） | ✅ `npm test` |
+| 离线验证（语法、清单、manifest、桩驱动冒烟、pack 文件清单） | ✅ `npm test`（32 项检查；Host 冒烟 33 条、Client 冒烟 36 条断言） |
 | 安装到真实 profile + 真机交互验证（§7.2 清单） | ⬜ 待做（需安装审批） |
 | 内联 ghost 样式（`conversation.input.overlay`，P2） | ⬜ 未实现，v1 固定用下方建议条 |
 | 自查设置页（`settings.section`，P2） | ⬜ 未实现，v1 用 Settings 自动表单 / patch |
@@ -156,7 +156,7 @@ npm run pack:dry
 ```
 dsh-followup-prompt/
 ├── package.json            # dsh.bundle.patch + dsh.client + exports/files/engines
-├── cordis.patch.yml        # Host Loader row（config 全字段重述）
+├── cordis.patch.yml        # Host Loader row（config 全字段重述，且与 Config 默认值逐项一致）
 ├── host/                   # Host 半边：index / config / prediction / cache / channel
 ├── client.js               # 浏览器半边：lazy-CJS + React.createElement，无构建步骤
 ├── locale/{en,zh}.json     # 插件管理器展示用 meta.title/description
@@ -168,15 +168,28 @@ dsh-followup-prompt/
 └── LICENSE
 ```
 
+### 依赖解析（开发 vs 安装后）
+
+- **安装后**：Host 代码里的 `@deepseek-ai/dsh-llm`、`@deepseek-ai/schemastery` 由 DSH 的
+  profile-resolution 拦截层解析到**正在运行的 dsh 安装闭包**（`app.asar/dsh/node_modules`），
+  不使用本仓库或 `~/.dsh/profiles/node_modules` 里的物理副本。因此无需把 `@deepseek-ai/*`
+  写进 `dependencies`；`peerDependenciesMeta.optional` 只用于声明兼容性，不触发安装。
+- **开发/离线验证**：本仓库没有该拦截层，`npm run links` 会在 `./node_modules/@deepseek-ai`
+  创建指向一个 DSH 共享依赖目录的软链供 Node 解析。该目录可能来自**更早的 Harness 版本**
+  （本机实测为 `0.1.7-alpha.2`，而运行中的应用是 `0.2.1-rc.2`），所以离线冒烟验证的是
+  「契约与装配」，不是与活体安装包逐字节一致的运行时。安装后的真机验证仍以方案 §7.2 为准。
+
 ## 验证状态
 
-**已完成的离线检查**（`npm test`）：
+**已完成的离线检查**（`npm test`，共 32 项检查，全部通过）：
 
 - 所有运行时 JS `node --check`；`package.json` manifest / exports / `files` 完整性；
-- locale JSON、icon SVG、`cordis.patch.yml` 结构（字段齐全、无 unknown key）；
-- Host 入口契约（name/inject/Config/apply）与 Client 契约（ModuleLoader id、dock slot、RPC endpoint、无 `submit()`）；
-- Host/Client 桩驱动冒烟：通道注册、turn/end 触发、缓存命中、dismiss、坏请求、tool-call 拒绝、slot 注册等；
-- `pnpm pack --dry-run` 打包文件清单。
+- locale JSON、icon SVG、`cordis.patch.yml` 结构（19 个字段齐全、无 unknown key，且**逐项等于** `host/config.js` 的 `DEFAULTS`）；
+- `Config` schema 实测：19 个默认值、volatile live refs 解包、越界值拒绝、provider/model 必须成对；
+- Host 入口契约（name/inject 四项/Config/apply）与 Client 契约（classic script 无 import/export、ModuleLoader id、dock slot、RPC endpoint、`[data-composer-input]` 门、无 `submit()`）；
+- Host 桩驱动冒烟 **33 条**（通道注册一次、turn/end 触发一次调用、缓存命中不重复计费、dismiss→stale、坏请求/未知 endpoint 信封、tool-call 拒绝的配对合法性/轮次上限/重复 callId、采样、并发 busy、abort 语义、prefetch、TTL、子代理排除、裁剪/turn cap/stripMedia、卸载清理）；
+- Client 桩驱动冒烟 **36 条**（模块 id/inject/apply、locale+slot 注册、RPC 信封解包/静默失败、状态机渲染路径、Tab 接受 insertText/回退 setDraft、IME/草稿/running 隐藏、缓存复显、关闭/Esc、源码护栏）；
+- `pnpm pack --dry-run` 打包文件清单（含 host/、client.js、patch、locale、icon、docs/protocol.md、README、LICENSE）。
 
 **尚未完成（需要安装到活体后验证）**：
 

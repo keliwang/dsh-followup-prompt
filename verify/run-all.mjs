@@ -20,7 +20,7 @@
 import { spawnSync } from 'node:child_process'
 import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
-import { fileURLToPath } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const argv = new Set(process.argv.slice(2))
@@ -60,6 +60,7 @@ const REQUIRED_PACKED_FILES = [
   'locale/en.json',
   'locale/zh.json',
   'icon.svg',
+  'docs/protocol.md',
   'README.md',
   'LICENSE',
 ]
@@ -92,6 +93,25 @@ function nodeCheck(path) {
   if (result.status !== 0) {
     throw new Error((result.stderr || result.stdout || `exit ${result.status}`).trim())
   }
+}
+
+/**
+ * Parse one scalar value from the flat `config:` block of cordis.patch.yml.
+ * Only the YAML subset this patch uses is supported (quoted strings, booleans,
+ * integers/floats); anything else is returned as its trimmed text.
+ * @param {string} text - raw scalar text after `key:`.
+ * @returns {string | number | boolean | undefined} the parsed value.
+ */
+function parsePatchScalar(text) {
+  const value = text.trim()
+  if (value === '') return undefined
+  if ((value.startsWith("'") && value.endsWith("'")) || (value.startsWith('"') && value.endsWith('"'))) {
+    return value.slice(1, -1)
+  }
+  if (value === 'true') return true
+  if (value === 'false') return false
+  if (/^-?\d+(?:\.\d+)?$/.test(value)) return Number(value)
+  return value
 }
 
 // ── 1. Syntax ────────────────────────────────────────────────────────────────
@@ -209,26 +229,105 @@ try {
   if (!/^\s*-\s*insert:\s*$/m.test(patch)) throw new Error('patch has no insert block')
   if (!/^\s*-\s*id:\s*followup-prompt\s*$/m.test(patch)) throw new Error('patch row id is not followup-prompt')
   if (!/^\s*name:\s*dsh-followup-prompt\s*$/m.test(patch)) throw new Error('patch row name is not dsh-followup-prompt')
-  const configBlock = patch.split(/^ {8}config:\s*$/m)[1] ?? ''
-  const keys = [...configBlock.matchAll(/^ {10}([A-Za-z][A-Za-z0-9]*):/gm)].map((match) => match[1])
+  // `config:` is a mapping key under the inserted list item; its indent is
+  // 4/6/8 spaces depending on the patch style (plan §6.2 uses 4). Read the
+  // direct children of that block instead of hard-coding an indent.
+  const configMatch = patch.match(/^([ ]*)config:\s*$/m)
+  if (configMatch === null) throw new Error('patch row has no config block')
+  const configIndent = configMatch[1].length
+  const configBlock = patch.slice(configMatch.index + configMatch[0].length)
+  const keys = []
+  const values = new Map()
+  for (const line of configBlock.split('\n')) {
+    if (line.trim() === '' || /^\s*#/.test(line)) continue
+    const child = line.match(/^([ ]*)([A-Za-z][A-Za-z0-9]*):(.*)$/)
+    if (child === null) continue
+    if (child[1].length <= configIndent) break
+    if (child[1].length === configIndent + 2) {
+      keys.push(child[2])
+      values.set(child[2], parsePatchScalar(child[3]))
+    }
+  }
   const missing = EXPECTED_CONFIG_KEYS.filter((key) => !keys.includes(key))
   const unknown = keys.filter((key) => !EXPECTED_CONFIG_KEYS.includes(key))
   if (missing.length > 0) throw new Error(`patch config is missing fields: ${missing.join(', ')}`)
   if (unknown.length > 0) throw new Error(`patch config has unknown fields: ${unknown.join(', ')}`)
-  pass('cordis.patch.yml', `row followup-prompt, ${keys.length} config fields`)
+
+  // Cross-check both the field set and every default against the Host schema so
+  // the patch (which replaces the whole row config) cannot drift from Config.
+  let defaults
+  try {
+    const module = await import(pathToFileURL(join(root, 'host/config.js')).href)
+    defaults = module.DEFAULTS
+  } catch (error) {
+    throw new Error(`cannot import host/config.js (run "npm run links" first): ${String(error.message ?? error)}`)
+  }
+  const schemaKeys = Object.keys(defaults)
+  if (JSON.stringify(schemaKeys) !== JSON.stringify(EXPECTED_CONFIG_KEYS)) {
+    throw new Error('EXPECTED_CONFIG_KEYS is out of sync with host/config.js DEFAULTS')
+  }
+  const mismatched = []
+  for (const key of keys) {
+    if (!Object.is(values.get(key), defaults[key])) {
+      mismatched.push(`${key}: patch ${JSON.stringify(values.get(key))} != default ${JSON.stringify(defaults[key])}`)
+    }
+  }
+  if (mismatched.length > 0) throw new Error(`patch defaults differ from Config: ${mismatched.join('; ')}`)
+  pass('cordis.patch.yml', `row followup-prompt, ${keys.length} config fields match Config defaults`)
 } catch (error) {
   fail('cordis.patch.yml', String(error.message ?? error))
 }
 
 // ── 4. Entry contracts + stub smoke scripts ────────────────────────────────
-console.log('\n[4/5] Host/Client entry contracts and stub smoke tests')
+console.log('\n[4/5] Host/Client entry contracts, Config schema, and stub smoke tests')
+try {
+  const { Config, DEFAULTS: configDefaults, resolveConfig } = await import(
+    pathToFileURL(join(root, 'host/config.js')).href
+  )
+  // The Loader validates the row config through this schema; volatile fields
+  // arrive as live `{ get() }` refs, which resolveConfig must unwind.
+  const validated = Config(configDefaults)
+  const resolvedValidated = resolveConfig(validated)
+  for (const key of Object.keys(configDefaults)) {
+    if (!Object.is(resolvedValidated[key], configDefaults[key])) {
+      throw new Error(`resolveConfig(${key}) = ${JSON.stringify(resolvedValidated[key])}`)
+    }
+  }
+  // An empty row config must materialize every documented default through the schema.
+  const resolvedEmpty = resolveConfig(Config({}))
+  for (const key of Object.keys(configDefaults)) {
+    if (!Object.is(resolvedEmpty[key], configDefaults[key])) {
+      throw new Error(`empty config default ${key} = ${JSON.stringify(resolvedEmpty[key])}`)
+    }
+  }
+  // Documented bounds must reject an impossible row instead of half-applying it.
+  let rejected = false
+  try {
+    Config({ ...configDefaults, maxConcurrent: 999 })
+  } catch {
+    rejected = true
+  }
+  if (!rejected) throw new Error('Config accepted maxConcurrent 999 (outside 1..16)')
+  // A half-configured provider/model pair must fall back to the session route.
+  const pair = resolveConfig(Config({ ...configDefaults, provider: 'p', model: '' }))
+  if (pair.provider !== '' || pair.model !== '') throw new Error('half-configured provider/model pair was not dropped')
+  pass('Config schema', '19 defaults / volatile refs / bounds / provider-model pair')
+} catch (error) {
+  fail('Config schema', String(error.message ?? error))
+}
+
 try {
   const host = read('host/index.js')
   if (!/export\s+const\s+name\s*=\s*['"]followup-prompt['"]/.test(host)) throw new Error('host name export is missing')
-  if (!/export\s+const\s+inject\s*=/.test(host)) throw new Error('host inject export is missing')
+  const injectMatch = host.match(/export\s+const\s+inject\s*=\s*\[([^\]]*)\]/)
+  if (injectMatch === null) throw new Error('host inject export is missing')
+  const injectNames = [...injectMatch[1].matchAll(/['"]([^'"]+)['"]/g)].map((match) => match[1])
+  for (const required of ['connection', 'llm', 'sessions', 'webServer']) {
+    if (!injectNames.includes(required)) throw new Error(`host inject is missing "${required}"`)
+  }
   if (!/export\s+const\s+Config\b/.test(host)) throw new Error('host Config export is missing')
   if (!/export\s+function\s+apply\s*\(/.test(host)) throw new Error('host apply export is missing')
-  pass('host entry contract', 'name / inject / Config / apply')
+  pass('host entry contract', `name / inject [${injectNames.join(', ')}] / Config / apply`)
 } catch (error) {
   fail('host entry contract', String(error.message ?? error))
 }
@@ -237,14 +336,19 @@ try {
   const client = read('client.js')
   if (!client.includes('window.__ModuleLoader__.load(')) throw new Error('ModuleLoader registration is missing')
   if (!/id:\s*['"]dsh-followup-prompt['"]/.test(client)) throw new Error('client module id is not dsh-followup-prompt')
-  if (!client.includes("'conversation.composer.dock'")) throw new Error("composer dock slot is not registered")
-  if (!client.includes("'suggestions/wait'")) throw new Error("suggestions/wait endpoint is not called")
-  if (!client.includes("'suggestions/dismiss'")) throw new Error("suggestions/dismiss endpoint is not called")
+  if (!/require\(\s*['"]react['"]\s*\)/.test(client)) throw new Error("client does not require('react') from the module table")
+  // The browser half is loaded as a classic script by the ModuleLoader: an
+  // import/export statement would parse only under ESM and never execute.
+  if (/^\s*(?:import|export)\s/m.test(client)) throw new Error('client.js must be a classic script (no import/export)')
+  if (!client.includes("'conversation.composer.dock'")) throw new Error('composer dock slot is not registered')
+  if (!client.includes("'suggestions/wait'")) throw new Error('suggestions/wait endpoint is not called')
+  if (!client.includes("'suggestions/dismiss'")) throw new Error('suggestions/dismiss endpoint is not called')
+  if (!client.includes('data-composer-input')) throw new Error('[data-composer-input] accept gate is missing')
   if (/\.submit\s*\(/.test(client)) throw new Error('client must never call submit()')
   if (/\bcontenteditable\b/.test(client) && !/data-composer-input/.test(client)) {
     throw new Error('contenteditable referenced without the [data-composer-input] gate')
   }
-  pass('client entry contract', 'ModuleLoader id / dock slot / RPC endpoints / no submit')
+  pass('client entry contract', 'classic script / module id / dock slot / RPC endpoints / no submit')
 } catch (error) {
   fail('client entry contract', String(error.message ?? error))
 }

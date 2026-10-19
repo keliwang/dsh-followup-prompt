@@ -57,8 +57,13 @@ Semantics:
   background; a later wait can still observe it).
 - Deterministic sampling (`sampleRate < 1`) → `reason: "sampled-out"`, cached for the turn.
 - Global concurrency (`maxConcurrent`) exceeded → `reason: "busy"`.
-- Model/provider failure → `reason: "error"`; abort/disposal → `reason: "aborted"`; a model that
-  still insists on tool calls after `maxToolRejectRounds` → `reason: "tool-rejected"`.
+- Master switch off (`enabled: false`) → `reason: "disabled"` (nothing is generated or cached).
+- Model/provider failure → `reason: "error"`; abort/timeout → `reason: "aborted"` / `"timeout"`;
+  output truncated by `maxTokens` (`finish.kind === "max-tokens"`) → `reason: "max-tokens"`;
+  a model that still insists on tool calls after `maxToolRejectRounds` → `reason: "tool-rejected"`.
+- Successful completion whose text is rejected by the local filter (empty, `NO_PREDICTION`,
+  control characters, secret-like shape) → `{ suggestion: null, turn }` with **no** `reason`;
+  the Host logs it as `filtered`. The Client treats every null suggestion identically.
 
 ### `suggestions/dismiss`
 
