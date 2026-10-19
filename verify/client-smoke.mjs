@@ -713,9 +713,13 @@ await checkAsync('Tab inside the composer accepts into the draft and never sends
     face.dismissPayload = payload
     return Promise.resolve()
   }
+  let focusCalls = 0
+  face.focusComposer = () => { focusCalls += 1 }
   const { componentHarness, props } = makeComponentProps(state, face, actions)
   let element = await settle(componentHarness, registrations[0].component, props)
   assert.notEqual(element, null)
+  const focusedEditor = new dom.FakeElement(true)
+  dom.document.activeElement = focusedEditor
   const event = dispatchTab(new dom.FakeElement(true))
   assert.equal(event.defaultPrevented, true)
   assert.equal(event.propagationStopped, true)
@@ -723,8 +727,10 @@ await checkAsync('Tab inside the composer accepts into the draft and never sends
   assert.deepEqual(actions.calls.insertText, [{ text: 'hello there', span: { start: 0, end: 0, draftRev: 4 } }])
   assert.deepEqual(actions.calls.setDraft, [])
   assert.equal(actions.calls.submit, 0)
+  assert.equal(focusCalls, 0, 'Tab accept must not re-focus an already focused editor')
   assert.deepEqual(face.dismissPayload, { sessionId: 'session-1', turn: 7 })
-  // The bar clears after accepting.
+  dom.document.activeElement = null
+  // The ghost clears after accepting.
   element = await settle(componentHarness, registrations[0].component, props)
   assert.equal(element, null)
   componentHarness.unmount()

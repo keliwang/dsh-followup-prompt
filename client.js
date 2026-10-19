@@ -204,6 +204,18 @@ window.__ModuleLoader__.load({
       }
     }
 
+    /** Whether the composer editor currently owns keyboard focus. */
+    function composerHasFocus() {
+      if (typeof document === 'undefined') return false
+      const active = document.activeElement
+      if (active === null || active === undefined || typeof active.closest !== 'function') return false
+      try {
+        return active.closest(COMPOSER_INPUT_SELECTOR) !== null
+      } catch (error) {
+        return false
+      }
+    }
+
     /** Whether the event target is (inside) the composer's editable host. */
     function isInsideComposer(target) {
       if (target === null || target === undefined || typeof target !== 'object') return false
@@ -515,10 +527,15 @@ window.__ModuleLoader__.load({
         if (!writeDraft(text)) return false
         cacheRef.current = null
         dismissedRef.current = false
-        try {
-          if (typeof focusComposer === 'function') focusComposer()
-        } catch (error) {
-          /* focus is best-effort */
+        // Tab accepts while the editor already holds focus; focusing a focused
+        // editor can restore an older caret, so only return the keyboard from an
+        // accept initiated outside the composer.
+        if (typeof focusComposer === 'function' && composerHasFocus() === false) {
+          try {
+            focusComposer()
+          } catch (error) {
+            /* focus is best-effort */
+          }
         }
         dismissCurrent()
         setSuggestion(null)
@@ -768,7 +785,9 @@ window.__ModuleLoader__.load({
         fontStyle: ghostLayout.fontStyle,
         letterSpacing: ghostLayout.letterSpacing,
       }
-      const hintStyle = { ...styles.hint, top: ghostTop, right: 8, height: lineHeight }
+      // `line-height: normal` is valid CSS but not a usable height for the hint.
+      const hintHeight = /^[0-9.]+px$/.test(String(lineHeight)) ? lineHeight : '22px'
+      const hintStyle = { ...styles.hint, top: ghostTop, right: 8, height: hintHeight }
       return h('div', {
         key: 'followup-prompt',
         ref: ghostRootRef,
@@ -779,7 +798,7 @@ window.__ModuleLoader__.load({
         style: styles.root,
       },
         h('style', { key: 'styles' }, CSS_TEXT),
-        h('span', { key: 'ghost', 'aria-hidden': 'true', style: ghostStyle }, suggestion),
+        h('span', { key: 'ghost', style: ghostStyle }, suggestion),
         h('span', { key: 'hint', style: hintStyle },
           h('kbd', { key: 'kbd', style: styles.kbd }, 'Tab'),
           h('span', { key: 'hintText' }, translate('prediction.acceptHint')),
