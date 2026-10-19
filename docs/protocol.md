@@ -42,7 +42,6 @@ Request:
 ```jsonc
 {
   "sessionId": "…",   // required, non-empty string
-  "turn": 7,          // optional, integer >= 0; Client's view of the expected turn
   "waitMs": 12000     // optional, 0..15000; default 12000, Host-capped at 15000
 }
 ```
@@ -59,8 +58,7 @@ Success value:
 
 Semantics:
 
-- `turn` mismatch with the Host's latest completed turn → `{ suggestion: null, turn: <latest>,
-  reason: "stale" }` (the Client may retry once with the returned turn).
+- The Host always predicts for its own latest completed turn; the Client does not name one.
 - No completed turn yet / unknown session / subagent session → `{ suggestion: null, turn: null,
   reason: "unknown-session" | "no-completed-turn" }`.
 - Cached terminal result for `(sessionId, turn)` returns immediately (a `null` result is cached too,
@@ -69,19 +67,19 @@ Semantics:
   waiter. The Host cancels work when the last waiter leaves (unless `prefetchOnTurnEnd` started it).
 - `waitMs` expiry → `{ suggestion: null, turn, reason: "timeout" }` (generation may continue in the
   background; a later wait can still observe it).
-- Deterministic sampling (`sampleRate < 1`) → `reason: "sampled-out"`, cached for the turn.
-- Global concurrency (`maxConcurrent`) exceeded → `reason: "busy"`.
+- Deterministic sampling (internal `sampleRate < 1`) → `reason: "sampled-out"`, cached for the turn.
+- Global concurrency (internal `maxConcurrent`) exceeded → `reason: "busy"`.
 - Master switch off (`enabled: false`) → `reason: "disabled"` (nothing is generated or cached).
 - Model/provider failure → `reason: "error"`; abort/timeout → `reason: "aborted"` / `"timeout"`;
   output truncated by `maxTokens` (`finish.kind === "max-tokens"`) → `reason: "max-tokens"`;
-  a model that still insists on tool calls after `maxToolRejectRounds` → `reason: "tool-rejected"`.
+  a model that still insists on tool calls after the internal `maxToolRejectRounds` → `reason: "tool-rejected"`.
 - Successful completion whose text is rejected by the local filter (empty, `NO_PREDICTION`,
   control characters, secret-like shape) → `{ suggestion: null, turn }` with **no** `reason`;
   the Host logs it as `filtered`. The Client treats every null suggestion identically.
 
 ### `suggestions/dismiss`
 
-Request: `{ "sessionId": "…", "turn": 7 /* optional integer >= 0 */ }`
+Request: `{ "sessionId": "…", "turn": 7 /* optional integer >= 0, the turn from the wait result */ }`
 
 Success value: `{ "ok": true }`
 
@@ -111,7 +109,8 @@ idle
 requesting ──(suggestion !== null && conditions still hold)──> shown
 requesting ──(null / reason / ok:false / abort / timeout)────> idle (silent)
 shown ──(draft !== '' || running || phase !== 'plain' || session switch || unmount)──> hidden (abort)
-shown ──(Tab or click accept)──> accepted: write draft via inputActions, call suggestions/dismiss, clear
+hidden ──(conditions hold again, same session and turn)──> shown from the local cache (no RPC)
+shown ──(Tab accept)──> accepted: write draft via inputActions, call suggestions/dismiss, clear
 shown ──(close / Esc)────────> hidden: call suggestions/dismiss, clear
 ```
 

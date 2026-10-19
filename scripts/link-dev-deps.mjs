@@ -9,7 +9,7 @@ import { fileURLToPath } from 'node:url'
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const force = process.argv.includes('--force')
-const REQUIRED_PACKAGES = ['schemastery', 'dsh-llm', 'dsh-session', 'dsh-host-webserver']
+const REQUIRED_PACKAGES = ['schemastery', 'dsh-llm']
 
 const candidates = []
 if (process.env.DSH_PROFILE_DIR) {
@@ -63,4 +63,4 @@ if (exists) {
 
 symlinkSync(source, target, 'dir')
 console.log(`[link-dev-deps] linked node_modules/@deepseek-ai -> ${source}`)
-console.log('[link-dev-deps] Host imports and `node verify/*.mjs` can now resolve @deepseek-ai/*.')
+console.log('[link-dev-deps] Host imports and `npm test` can now resolve @deepseek-ai/*.')

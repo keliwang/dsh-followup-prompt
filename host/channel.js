@@ -1,13 +1,8 @@
 // `/api/followup-prompt/rpc` exact Fetch route. Wire contract: docs/protocol.md.
 
-import { resolveConfig } from './config.js'
-import { isSubagentSession, latestCompletedTurn } from './cache.js'
+import { isSubagentSession, latestCompletedTurn } from './session.js'
 
 export const ROUTE = '/api/followup-prompt/rpc'
-
-export const ENDPOINT_WAIT = 'suggestions/wait'
-
-export const ENDPOINT_DISMISS = 'suggestions/dismiss'
 
 export const DEFAULT_WAIT_MS = 12000
 export const MAX_WAIT_MS = 15000
@@ -20,108 +15,74 @@ function failure(code, message, details = {}) {
   return { ok: false, error: { code, message, details } }
 }
 
-function jsonResponse(envelope) {
-  return Response.json(envelope)
-}
-
 function isPlainObject(value) {
   return value !== null && typeof value === 'object' && !Array.isArray(value)
 }
 
-function parseTurn(value) {
-  if (value === undefined) return undefined
-  if (typeof value !== 'number' || !Number.isInteger(value) || value < 0) return null
-  return value
+function isSessionId(value) {
+  return typeof value === 'string' && value.trim().length > 0
 }
 
-function parseSessionId(value) {
-  if (typeof value !== 'string' || value.length === 0 || value.trim().length === 0) return null
-  return value
+function isCount(value) {
+  return Number.isInteger(value) && value >= 0
 }
 
-export function parseWaitRequest(payload) {
-  if (!isPlainObject(payload)) return null
-  const sessionId = parseSessionId(payload.sessionId)
-  if (sessionId === null) return null
-  const turn = parseTurn(payload.turn)
-  if (turn === null) return null
-  let waitMs = DEFAULT_WAIT_MS
-  if (payload.waitMs !== undefined) {
-    if (typeof payload.waitMs !== 'number' || !Number.isInteger(payload.waitMs) || payload.waitMs < 0) return null
-    waitMs = Math.min(payload.waitMs, MAX_WAIT_MS)
-  }
-  return { sessionId, turn, waitMs }
+function parseWaitRequest(payload) {
+  if (!isPlainObject(payload) || !isSessionId(payload.sessionId)) return null
+  const { waitMs = DEFAULT_WAIT_MS } = payload
+  if (!isCount(waitMs)) return null
+  return { sessionId: payload.sessionId, waitMs: Math.min(waitMs, MAX_WAIT_MS) }
 }
 
-export function parseDismissRequest(payload) {
-  if (!isPlainObject(payload)) return null
-  const sessionId = parseSessionId(payload.sessionId)
-  if (sessionId === null) return null
-  const turn = parseTurn(payload.turn)
-  if (turn === null) return null
-  return { sessionId, turn }
+function parseDismissRequest(payload) {
+  if (!isPlainObject(payload) || !isSessionId(payload.sessionId)) return null
+  if (payload.turn !== undefined && !isCount(payload.turn)) return null
+  return { sessionId: payload.sessionId, turn: payload.turn }
 }
 
 function lookupSession(ctx, sessionId) {
   try {
-    const store = ctx?.sessions
-    if (store === undefined || typeof store.get !== 'function') return undefined
-    return store.get(sessionId)
+    return ctx.sessions.get(sessionId)
   } catch {
     return undefined
   }
 }
 
-async function waitForSuggestion({ ctx, cache, getConfig, request, signal }) {
+async function waitForSuggestion({ ctx, cache, getConfig }, request, signal) {
   const config = getConfig()
   if (!config.enabled) return { suggestion: null, turn: null, reason: 'disabled' }
   const session = lookupSession(ctx, request.sessionId)
-  if (session === undefined) return { suggestion: null, turn: null, reason: 'unknown-session' }
-  if (config.excludeSubagents && isSubagentSession(session)) {
-    // Subagent traffic must not bill the user or surface in the composer.
+  // Subagent traffic must not bill the user or surface in the composer.
+  if (session === undefined || (config.excludeSubagents && isSubagentSession(session))) {
     return { suggestion: null, turn: null, reason: 'unknown-session' }
   }
   const turn = latestCompletedTurn(session)
   if (turn === null) return { suggestion: null, turn: null, reason: 'no-completed-turn' }
-  if (request.turn !== undefined && request.turn !== turn) {
-    // The client's view is one turn behind (e.g. it mounted mid-turn); tell it
-    // the authoritative turn instead of predicting a stale one.
-    return { suggestion: null, turn, reason: 'stale' }
-  }
   return cache.wait({ session, turn, waitMs: request.waitMs, signal })
 }
 
-function dismissSuggestion({ ctx, cache, request }) {
-  const session = lookupSession(ctx, request.sessionId)
-  if (session === undefined) return { ok: true }
-  const turn = request.turn ?? latestCompletedTurn(session) ?? undefined
-  cache.dismiss(request.sessionId, turn)
+function dismissSuggestion({ cache }, request) {
+  cache.dismiss(request.sessionId, request.turn)
   return { ok: true }
 }
 
-export function createFetchRoute({ ctx, config, cache }) {
-  const getConfig = typeof config === 'function' ? config : () => resolveConfig(config)
+const ENDPOINTS = new Map([
+  ['suggestions/wait', { parse: parseWaitRequest, run: waitForSuggestion }],
+  ['suggestions/dismiss', { parse: parseDismissRequest, run: dismissSuggestion }],
+])
 
+export function createFetchRoute(deps) {
   const dispatch = async (body, signal) => {
     if (!isPlainObject(body)) return failure(ERROR_BAD_REQUEST, 'request body must be a JSON object')
-    const endpoint = body.endpoint
-    if (typeof endpoint !== 'string' || endpoint.length === 0) {
+    const name = body.endpoint
+    if (typeof name !== 'string' || name.length === 0) {
       return failure(ERROR_BAD_REQUEST, 'endpoint must be a non-empty string')
     }
-    if (endpoint === ENDPOINT_WAIT) {
-      const request = parseWaitRequest(body.payload)
-      if (request === null) return failure(ERROR_BAD_REQUEST, 'invalid suggestions/wait payload')
-      return {
-        ok: true,
-        value: await waitForSuggestion({ ctx, cache, getConfig, request, signal }),
-      }
-    }
-    if (endpoint === ENDPOINT_DISMISS) {
-      const request = parseDismissRequest(body.payload)
-      if (request === null) return failure(ERROR_BAD_REQUEST, 'invalid suggestions/dismiss payload')
-      return { ok: true, value: dismissSuggestion({ ctx, cache, request }) }
-    }
-    return failure(ERROR_BAD_ENDPOINT, `unknown endpoint ${JSON.stringify(endpoint)}`)
+    const endpoint = ENDPOINTS.get(name)
+    if (endpoint === undefined) return failure(ERROR_BAD_ENDPOINT, `unknown endpoint ${JSON.stringify(name)}`)
+    const request = endpoint.parse(body.payload)
+    if (request === null) return failure(ERROR_BAD_REQUEST, `invalid ${name} payload`)
+    return { ok: true, value: await endpoint.run(deps, request, signal) }
   }
 
   return {
@@ -136,17 +97,14 @@ export function createFetchRoute({ ctx, config, cache }) {
       try {
         body = await request.json()
       } catch {
-        return jsonResponse(failure(ERROR_BAD_REQUEST, 'request body must be JSON'))
+        return Response.json(failure(ERROR_BAD_REQUEST, 'request body must be JSON'))
       }
       try {
-        return jsonResponse(await dispatch(body, request.signal))
+        return Response.json(await dispatch(body, request.signal))
       } catch (error) {
         // Never throw: the transport would answer 500 instead of a protocol envelope.
-        try {
-          ctx.logger?.debug?.('followup-prompt: api route failed: %s', String(error?.message ?? error).slice(0, 500))
-        } catch {
-        }
-        return jsonResponse(failure(ERROR_INTERNAL, 'internal error'))
+        deps.ctx.logger?.debug?.('followup-prompt: api route failed: %s', String(error?.message ?? error).slice(0, 500))
+        return Response.json(failure(ERROR_INTERNAL, 'internal error'))
       }
     },
   }

@@ -7,7 +7,7 @@
 
 ## 1. 目标与约束
 
-**交互**：回合正常结束后，在空输入框内展示一条「用户下一条消息」预测；Tab/点击接受为可编辑草稿，Esc/× 关闭；打字、新回合、切会话、IME 组合期间隐藏；任何失败都静默。
+**交互**：回合正常结束后，在空输入框内展示一条「用户下一条消息」预测；Tab 接受为可编辑草稿，Esc/× 关闭；打字、新回合、切会话、IME 组合期间隐藏；任何失败都静默。
 
 **硬约束**
 
@@ -28,14 +28,15 @@
 Host（Node）                                    Client（Web）
 session/event → turn/end(completed)             conversation.input.overlay 内联 ghost
   → 继承式一次性 ctx.llm.stream                  ← POST /api/followup-prompt/rpc (suggestions/wait，长轮询)
-  → 归一化 + 过滤 + 内存缓存                      Tab/点击 → inputActions 写入草稿（不发送）
+  → 归一化 + 过滤 + 内存缓存                      Tab → inputActions 写入草稿（不发送）
                                                   → suggestions/dismiss
 ```
 
 | 文件 | 职责 |
 |---|---|
 | `host/index.js` | 插件入口：`name`/`inject`/`Config`/`apply`，监听会话事件，注册路由 |
-| `host/config.js` | schemastery `Config`、`DEFAULTS`、`resolveConfig()`（解包 volatile 引用 + 夹取范围） |
+| `host/config.js` | 字段表 `FIELDS`（唯一配置来源）、由它生成的 schemastery `Config` 与 `resolveConfig()`（解包 volatile 引用 + 夹取范围） |
+| `host/session.js` | 会话只读视图：`latestCompletedTurn()`、`isSubagentSession()` |
 | `host/prediction.js` | 上下文构建、继承式请求、tool-rejection 循环、输出归一化与过滤 |
 | `host/cache.js` | 每会话一个 entry 的缓存与调度：去重、waiter 计数、dismiss、采样、并发、TTL |
 | `host/channel.js` | `/api/followup-prompt/rpc` Fetch 路由：入参校验、端点分发、错误信封 |
@@ -54,7 +55,7 @@ session/event → turn/end(completed)             conversation.input.overlay 内
 | 传输 | `/api` 下的 exact Fetch 路由 + 浏览器 `fetch` | 见 §4.7 |
 | UI | `conversation.input.overlay` 内联 ghost | 最接近 Codex；`conversation.input.dock` 上方建议条保留为降级方案 |
 | 存储 | 进程内 `Map<sessionId, Entry>` | 第三方插件不能新增 session 事件类型（未知事件会让会话无法 reopen） |
-| 配置 | Host `Config`，全部字段 `.volatile()` | 0.2.1 Settings 会自动生成表单并写回 profile patch |
+| 配置 | Host `Config` 只暴露用户字段，全部 `.volatile()`；调优参数留在内部 | 0.2.1 Settings 会自动生成表单并写回 profile patch；内部参数待定后再决定是否暴露 |
 
 ### 3.1 为什么不 fork
 
@@ -119,7 +120,7 @@ DSH 的一次请求是会话日志的纯函数，所以不 fork 也能复刻前�
 1. assistant(tool-call) 后**立即**跟每个 callId 一条 tool-result（DeepSeek serializer 会校验配对），中间不夹 user/文本。
 2. 合成 assistant 消息只放 tool-call block，不放 reasoning（thinking 段通常需要 provider 签名）。
 3. callId 为空、同轮重复或与之前轮次重复时放弃（重复 id 无法构成合法历史）。
-4. 所有轮次所有调用使用同一段 `isError` 文案（`toolRejectionText` 可覆盖）。
+4. 所有轮次所有调用使用同一段 `isError` 文案（内部参数 `toolRejectionText` 可覆盖）。
 5. 每轮带同一份 `tools` + `toolHistory`，保持前缀一致。
 6. `assembler.blocks()` 遇到未闭合的未知 block 会抛错，按 `error` 处理。
 7. finish 为 `max-tokens` 时 `BlockAssembler` 会丢弃 tool-call，按 `max-tokens` 处理。
@@ -148,10 +149,11 @@ DSH 的一次请求是会话日志的纯函数，所以不 fork 也能复刻前�
 
 ### 4.8 配置
 
+- `FIELDS` 是唯一的配置来源：每个字段声明类型、默认值和范围，`Config` schema、`DEFAULTS` 与 `resolveConfig()` 都由它生成。
+- 字段分两类。用户字段进入 `Config`，出现在 Settings 和 `cordis.patch.yml` 中，含义见 README 配置表。标记为 `internal` 的调优参数（`maxToolRejectRounds`、`toolRejectionText`、`maxSuggestionChars`、`stripMedia`、`sampleRate`、`cacheTtlMs`、`maxConcurrent`、`excludeSubagents`）不进 schema，平时取默认值；要暴露某个参数，去掉 `internal` 并在 patch 中补上该字段即可。schemastery 会透传 schema 之外的 key，所以旧 patch 里残留的这些字段仍会被读取和夹取。
 - `Config` 每个字段 `.volatile()`：0.2.1 会把它们替换成 Settings 页就地更新的 live 引用（`{ get() }`），所以运行时不能缓存配置快照，每个使用点都通过 `resolveConfig()` 重新解析。
-- `resolveConfig()` 是唯一的配置读取入口：解包引用、夹取范围、类型兜底，手改坏的配置不会让会话崩溃。
-- patch 的 `config` 是整体替换，`cordis.patch.yml` 必须重述全部字段，且与 `DEFAULTS` 逐项一致（`npm test` 会校验）。
-- 字段含义见 README 配置表。
+- `resolveConfig()` 是唯一的配置读取入口：解包引用、夹取范围、类型兜底，手改坏的配置不会让会话崩溃。下游代码因此直接读取已解析的值，不再做二次兜底。
+- patch 的 `config` 是整体替换，`cordis.patch.yml` 必须按顺序重述全部用户字段，且与 `DEFAULTS` 逐项一致（`npm test` 会校验）。
 
 ### 4.9 可观测与隐私
 
@@ -161,16 +163,16 @@ DSH 的一次请求是会话日志的纯函数，所以不 fork 也能复刻前�
 
 ### 5.1 模块形态
 
-`client.js` 是经典脚本，通过 `window.__ModuleLoader__.load({ id: 'dsh-followup-prompt', factory })` 注册，无构建步骤、无 JSX（`React.createElement`），只用模块表提供的 React。`inject: ['slots', 'sessions', 'locale']`。在 `ctx.effect` 中注册词典、键盘守卫和 `conversation.input.overlay` slot entry（order 100，排在菜单之后）。
+`client.js` 是经典脚本，通过 `window.__ModuleLoader__.load({ id: 'dsh-followup-prompt', factory })` 注册，无构建步骤、无 JSX（`React.createElement`），只用模块表提供的 React。`inject: ['slots', 'locale']`。只面向 0.2.1 的真实 API 编写，不为不存在的 API 写兜底分支。在 `ctx.effect` 中注册词典、键盘守卫和 `conversation.input.overlay` slot entry（order 100，排在菜单之后）。
 
 ### 5.2 状态机
 
 使用 slot 标准 props：`useSession`（`running`/`blank`/`awaitingFirstTurn`）、`useInput`（`draft`/`phase`/`attachmentIds`）、`inputActions`、`t`。
 
 - **可显示条件**：空闲、非空会话、非首回合等待、草稿为空、`phase === 'plain'`、无附件、非 IME 组合。
-- 每个空闲 epoch 只请求一次；`running` 变 true 开启新 epoch；切会话重置全部状态。
+- 每个空闲 epoch 只请求一次；`running` 变 true 或切会话都会开启新 epoch（切到空闲会话会立即为它请求）。
 - 条件暂时不满足（如打字）时隐藏并取消请求，但不 dismiss；同一回合草稿清空后直接复显本地缓存，不再请求。
-- 所有失败（无 fetch、非 200、中止、坏 JSON、`ok:false`）都解析为 `null`，调用方天然静默。客户端另有 20s 兜底超时。
+- 所有失败（无 fetch、非 200、中止、坏 JSON、`ok:false`）都解析为 `null`，调用方天然静默。客户端另有 20s 兜底超时（`AbortSignal.timeout`）。
 
 完整状态机见 protocol.md。
 
@@ -188,7 +190,7 @@ DSH 的一次请求是会话日志的纯函数，所以不 fork 也能复刻前�
 
 `document` capture 阶段监听 keydown，满足全部条件才处理：有可见 ghost、非 IME（`isComposing` 或 `keyCode 229`）、无修饰键、目标在 `[data-composer-input]` 内、没有可见的 `listbox`/`menu` 弹层。只有接受/关闭真正生效后才 `preventDefault + stopPropagation`，因此 Lexical 的 `TAB_COMMAND` 在未消费时照常工作。不拦截 Enter。
 
-写入草稿优先 `captureInsertion()` + `insertText(text, span)`（一次可撤销插入，带草稿版本校验），失败回退 `setDraft(text)`。只有 composer 未聚焦时（点击接受）才归还焦点——对已聚焦的编辑器再次 focus 会恢复旧光标位置。接受和关闭都会 fire-and-forget 调用 `suggestions/dismiss`。
+写入草稿只用 `captureInsertion()` + `insertText(text, span)`（一次可撤销插入，带草稿版本校验）；`insertText` 返回 false 时不消费 Tab，也不 dismiss，绝不退回会覆盖草稿的 `setDraft`。ghost 除关闭按钮外点击穿透，接受只能由 composer 内的 Tab 触发，此时编辑器已聚焦，因此不需要归还焦点。接受和关闭都会 fire-and-forget 调用 `suggestions/dismiss`。
 
 键盘守卫通过 `activateBar` 桥接到当前可见的 ghost；只有可见的 ghost 才发布 handle，避免不可见的第二个 composer 抢走手势。
 
@@ -210,8 +212,7 @@ DSH 的一次请求是会话日志的纯函数，所以不 fork 也能复刻前�
 
 ```bash
 npm run links     # 在 ./node_modules/@deepseek-ai 创建指向 DSH 共享依赖目录的软链（仅开发用）
-npm run check     # 静态检查：语法、manifest、locale、icon、patch 与 DEFAULTS 一致性、入口契约
-npm test          # 静态检查 + Host/Client 桩驱动冒烟 + pnpm pack --dry-run 文件清单
+npm test          # node:test 运行 verify/*.test.mjs
 npm run pack:dry  # 只看打包内容
 ```
 
@@ -219,9 +220,9 @@ npm run pack:dry  # 只看打包内容
 
 ### 7.2 离线验证覆盖
 
-- `verify/run-all.mjs`：所有运行时 JS `node --check`；manifest/exports/files；patch 字段齐全、无未知 key、与 `DEFAULTS` 逐项相等；`Config` 默认值、volatile 解包、越界拒绝、provider/model 成对；Host 与 Client 入口契约（包括 Client 不含 `submit()`）；打包文件清单。
-- `verify/host-smoke.mjs`：用桩 `ctx` 驱动真实 Host 模块——路由注册、触发与计费次数、缓存、dismiss、错误信封、tool-rejection（配对合法性、轮次上限、跨轮 callId 复用）、采样、并发、中止语义、预生成、TTL、子代理排除、裁剪、超时后生成继续、卸载清理。
-- `verify/client-smoke.mjs`：用假 DOM 驱动 `client.js`——模块注册、locale/slot、fetch 请求形状与静默失败、状态机、Tab 接受（`insertText`/回退 `setDraft`）、IME/草稿/运行中隐藏、缓存复显、关闭/Esc、焦点归还。
+- `verify/package.test.mjs`：manifest/exports/files 落盘；locale、icon；patch 按序重述全部用户字段且与 `DEFAULTS` 逐项相等；`pnpm pack --dry-run` 包含全部声明文件（无 pnpm 时跳过）。
+- `verify/host.test.mjs`：入口导出与 `Config` schema（默认值、volatile 解包、越界拒绝、provider/model 成对、内部字段不进 schema）；用桩 `ctx` 驱动真实 Host 模块——路由注册、触发与计费次数、缓存、dismiss、错误信封、tool-rejection（配对合法性、轮次上限、跨轮 callId 复用）、采样、并发、中止语义、`timeoutMs` 总 deadline、预生成、TTL、子代理排除、裁剪、轮询超时后生成继续、卸载清理。
+- `verify/client.test.mjs`：用假 DOM 与假 hook 运行时驱动 `client.js`——模块注册、locale/slot、fetch 请求形状与静默失败、状态机、切会话、Tab 接受（只走 `insertText`，从不 `submit`）、IME/草稿/运行中隐藏、缓存复显、关闭/Esc、弹层让出 Tab、主题 token 白名单。
 
 覆盖缺口：假 DOM 的 `querySelector` 返回 `null`，ghost 测量与 placeholder 隐藏路径没有覆盖，需要基于 jsdom 的测试补齐。
 
@@ -240,8 +241,8 @@ npm run pack:dry  # 只看打包内容
 
 仍需在页面上人工确认：
 
-1. Tab 与 Lexical / slash 命令弹层的竞争，`[data-composer-input]` 命中情况（失败则退回只支持点击接受）；
-2. `captureInsertion/insertText` 的真实行为、一次撤销、焦点归还；
+1. Tab 与 Lexical / slash 命令弹层的竞争，`[data-composer-input]` 命中情况；
+2. `captureInsertion/insertText` 的真实行为、一次撤销；
 3. ghost 在深/浅色、附件栏、多行输入、不同字号下的对齐；
 4. 切会话不串、IME 组合隐藏、断网静默、多窗口不重复计费、卸载后无残留监听器；
 5. 非 DeepSeek provider 对合成 tool-call 历史的接受度（失败则降级为「tool-call 即放弃」）；

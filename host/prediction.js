@@ -3,7 +3,7 @@
 
 import { BlockAssembler, createAssistantMessage, createToolResultMessage } from '@deepseek-ai/dsh-llm'
 
-export const PROMPT_VERSION = 1
+const PROMPT_VERSION = 1
 
 export const FOLLOWUP_INSTRUCTION = [
   'You predict the next message the human user will type in this coding conversation.',
@@ -30,10 +30,6 @@ export const PREDICTION_REASONS = Object.freeze({
   toolRejected: 'tool-rejected',
   maxTokens: 'max-tokens',
 })
-
-function finite(value, fallback) {
-  return typeof value === 'number' && Number.isFinite(value) ? value : fallback
-}
 
 export function estimateMessageChars(message) {
   let total = MESSAGE_OVERHEAD_CHARS
@@ -66,7 +62,7 @@ function isHeadMessage(message) {
 
 // Injected user context (file notices, skills, goals) has another `source.kind` and is
 // not a safe trim boundary.
-export function isHumanUserMessage(message) {
+function isHumanUserMessage(message) {
   return message?.role === 'user' && message?.source?.kind === 'user'
 }
 
@@ -85,8 +81,7 @@ function stripMediaFromMessage(message) {
 
 export function trimRequestMessages(messages, config, instructionChars = 0) {
   if (!Array.isArray(messages) || messages.length === 0) return null
-  const maxInputChars = finite(config?.maxInputChars, 0)
-  const maxTurns = finite(config?.maxTurns, 0)
+  const { maxInputChars, maxTurns } = config
   const budgetActive = maxInputChars > 0
   const turnsActive = maxTurns > 0
   if (!budgetActive && !turnsActive) return { messages, trimmed: false }
@@ -137,19 +132,15 @@ export function trimRequestMessages(messages, config, instructionChars = 0) {
   return { messages: kept, trimmed: true }
 }
 
-export function instructionText(config) {
-  const prompt = typeof config?.prompt === 'string' ? config.prompt.trim() : ''
-  return prompt.length > 0 ? prompt : FOLLOWUP_INSTRUCTION
-}
-
-function buildRequestBundle(session, config) {
-  const all = session?.deriveMessages?.()
+/** The history plus one tail instruction, or null when no safe trim fits the budget. */
+export function buildRequestMessages(session, config) {
+  const all = session.deriveMessages?.()
   if (!Array.isArray(all) || all.length === 0) return null
-  const instruction = instructionText(config)
+  const instruction = config.prompt || FOLLOWUP_INSTRUCTION
   const trimmed = trimRequestMessages(all, config, instruction.length + MESSAGE_OVERHEAD_CHARS)
   if (trimmed === null) return null
   let history = trimmed.messages
-  if (trimmed.trimmed && config?.stripMedia === true) history = history.map(stripMediaFromMessage)
+  if (trimmed.trimmed && config.stripMedia) history = history.map(stripMediaFromMessage)
   return {
     // The tail instruction is one plain user input: no second system slot, so
     // the inherited prefix stays reusable and cache-friendly.
@@ -158,12 +149,8 @@ function buildRequestBundle(session, config) {
   }
 }
 
-export function buildRequestMessages(session, config) {
-  return buildRequestBundle(session, config)?.messages ?? null
-}
-
-export function buildInheritedRequest(session, config, signal) {
-  const header = session?.requestHeader?.()
+function buildInheritedRequest(session, config) {
+  const header = session.requestHeader?.()
   if (header === null || typeof header !== 'object') return null
   const inherited = header.config
   if (inherited === null || typeof inherited !== 'object') return null
@@ -173,32 +160,30 @@ export function buildInheritedRequest(session, config, signal) {
   // The empty config value means "the provider default", NOT "inherit the
   // source request's effort": inheriting e.g. `max` burns the small output
   // budget on reasoning tokens and ends with finish=max-tokens and no text.
-  if (config?.reasoningEffort === undefined || config.reasoningEffort === '') {
+  if (config.reasoningEffort === '') {
     delete callConfig.reasoningEffort
   } else {
     callConfig.reasoningEffort = config.reasoningEffort
   }
 
-  const provider = config?.provider || callConfig.provider
-  const model = config?.model || callConfig.model
+  const provider = config.provider || callConfig.provider
+  const model = config.model || callConfig.model
   if (typeof provider !== 'string' || provider.length === 0) return null
   if (typeof model !== 'string' || model.length === 0) return null
 
-  const bundle = buildRequestBundle(session, config)
+  const bundle = buildRequestMessages(session, config)
   if (bundle === null) return null
 
   const options = {
     ...callConfig,
     provider,
     model,
-    messages: bundle.messages,
     // Keep the full tool declarations so the request prefix matches the parent
     // session's next request; tools are declared, never executed.
     ...(Array.isArray(header.tools) && header.tools.length > 0 ? { tools: header.tools } : {}),
     toolHistory: session.toolHistory?.(),
     sessionId: session.id,
-    maxTokens: config?.maxTokens,
-    signal,
+    maxTokens: config.maxTokens,
   }
   return { options, messages: bundle.messages, provider, model, degraded: bundle.degraded }
 }
@@ -218,33 +203,7 @@ export function normalizeSuggestion(raw, config) {
   if (/(sk-(?:proj-|ant-)?[A-Za-z0-9_-]{16,}|gh[posru]_[A-Za-z0-9]{20,}|AKIA[0-9A-Z]{16}|xox[baprs]-[A-Za-z0-9-]{10,}|AIza[0-9A-Za-z_-]{30,})/.test(text)) {
     return null
   }
-  const max = finite(config?.maxSuggestionChars, 400)
-  return text.length > max ? text.slice(0, max) : text
-}
-
-function createDeadline(parent, timeoutMs) {
-  const controller = new AbortController()
-  let timer
-  const parentAborted = () => parent?.aborted === true
-  const onAbort = () => {
-    controller.abort(parent?.reason instanceof Error ? parent.reason : new Error('followup-prompt: aborted'))
-  }
-  if (parent?.aborted) {
-    onAbort()
-  } else if (parent !== undefined) {
-    parent.addEventListener('abort', onAbort, { once: true })
-  }
-  if (!controller.signal.aborted) {
-    timer = setTimeout(() => controller.abort(new Error('followup-prompt: prediction timed out')), timeoutMs)
-  }
-  return {
-    signal: controller.signal,
-    timedOut: () => controller.signal.aborted && !parentAborted(),
-    dispose() {
-      if (timer !== undefined) clearTimeout(timer)
-      parent?.removeEventListener?.('abort', onAbort)
-    },
-  }
+  return text.slice(0, config.maxSuggestionChars)
 }
 
 // The synthetic assistant message carries only tool-call blocks: reasoning may need
@@ -275,10 +234,10 @@ function logPrediction(ctx, session, turn, config, startedAt, result, outcome) {
   const suggestion = result.suggestion
   const meta = {
     promptVersion: PROMPT_VERSION,
-    sessionId: String(session?.id ?? ''),
-    turn: typeof turn === 'number' ? turn : null,
-    provider: result.provider ?? config?.provider ?? '',
-    model: result.model ?? config?.model ?? '',
+    sessionId: String(session.id),
+    turn,
+    provider: result.provider ?? config.provider,
+    model: result.model ?? config.model,
     rounds: result.rounds,
     toolRejected: result.toolRejected === true,
     degraded: result.degraded === true,
@@ -298,21 +257,19 @@ export async function generatePrediction(ctx, session, turn, config, signal) {
 
   let built
   try {
-    built = buildInheritedRequest(session, config, signal)
+    built = buildInheritedRequest(session, config)
   } catch (error) {
     ctx.logger?.debug?.('followup-prompt: context assembly failed: %s', String(error?.message ?? error))
     return { suggestion: null, reason: PREDICTION_REASONS.error, ...base }
   }
   if (built === null) return { suggestion: null, reason: PREDICTION_REASONS.noRoute, ...base }
-  base.degraded = built.degraded
-  base.provider = built.provider
-  base.model = built.model
+  Object.assign(base, { degraded: built.degraded, provider: built.provider, model: built.model })
 
-  const deadline = createDeadline(signal, finite(config?.timeoutMs, 15000))
-  const rejectionText = typeof config?.toolRejectionText === 'string' && config.toolRejectionText.length > 0
-    ? config.toolRejectionText
-    : TOOL_REJECTION_TEXT
-  const maxRejectRounds = Math.max(0, finite(config?.maxToolRejectRounds, 1))
+  // `timeoutMs` is one deadline across every tool-rejection round.
+  const timeout = AbortSignal.timeout(config.timeoutMs)
+  const deadline = AbortSignal.any([signal, timeout])
+  const stopReason = () => (timeout.aborted && !signal.aborted ? PREDICTION_REASONS.timeout : PREDICTION_REASONS.aborted)
+  const rejectionText = config.toolRejectionText || TOOL_REJECTION_TEXT
   const usedCallIds = new Set()
   let messages = built.messages
   let usage
@@ -323,74 +280,62 @@ export async function generatePrediction(ctx, session, turn, config, signal) {
     return result
   }
 
-  try {
-    for (let round = 0; round <= maxRejectRounds; round += 1) {
-      base.rounds = round + 1
-      if (deadline.signal.aborted || signal?.aborted) {
-        return finish(deadline.timedOut() ? PREDICTION_REASONS.timeout : PREDICTION_REASONS.aborted)
-      }
-      const assembler = new BlockAssembler()
-      let streamError
-      try {
-        const stream = ctx.llm.stream({ ...built.options, messages, signal: deadline.signal })
-        for await (const chunk of stream) assembler.push(chunk)
-      } catch (error) {
-        streamError = error
-      }
-      usage = assembler.usage ?? usage
-
-      if (signal?.aborted) return finish(PREDICTION_REASONS.aborted)
-      if (deadline.timedOut()) return finish(PREDICTION_REASONS.timeout)
-      if (streamError !== undefined) {
-        // The LLM service turns adapter failures into terminal finish chunks, so
-        // this path is a consumer/middleware failure: silent, never throw.
-        ctx.logger?.debug?.('followup-prompt: stream failed: %s', String(streamError?.message ?? streamError))
-        return finish(PREDICTION_REASONS.error)
-      }
-
-      let blocks
-      try {
-        blocks = assembler.blocks()
-      } catch (error) {
-        // `blocks()` throws on an unknown block type left unclosed: treat as error.
-        ctx.logger?.debug?.('followup-prompt: assembly failed: %s', String(error?.message ?? error))
-        return finish(PREDICTION_REASONS.error)
-      }
-      const terminal = assembler.finish
-      const calls = blocks.filter((block) => block.type === 'tool-call')
-
-      if (calls.length === 0) {
-        if (terminal.kind !== 'stop') {
-          if (terminal.kind === 'aborted') {
-            return finish(deadline.timedOut() ? PREDICTION_REASONS.timeout : PREDICTION_REASONS.aborted)
-          }
-          return finish(terminal.kind === 'max-tokens' ? PREDICTION_REASONS.maxTokens : PREDICTION_REASONS.error)
-        }
-        const text = blocks.filter((block) => block.type === 'text').map((block) => block.text).join('')
-        const suggestion = normalizeSuggestion(text, config)
-        const result = { suggestion, ...base, usage: assembler.usage ?? usage }
-        logPrediction(ctx, session, turn, config, startedAt, result, suggestion === null ? 'filtered' : 'suggested')
-        return result
-      }
-
-      base.toolRejected = true
-      if (round >= maxRejectRounds) return finish(PREDICTION_REASONS.toolRejected)
-      const extended = appendToolRejections({
-        messages,
-        calls,
-        provider: built.provider,
-        model: built.model,
-        rejectionText,
-        usedCallIds,
-      })
-      if (extended === null) {
-        ctx.logger?.debug?.('followup-prompt: duplicate tool-call id; abandoning prediction')
-        return finish(PREDICTION_REASONS.toolRejected, 'duplicate-call-id')
-      }
-      messages = extended
+  for (let round = 0; ; round += 1) {
+    base.rounds = round + 1
+    if (deadline.aborted) return finish(stopReason())
+    const assembler = new BlockAssembler()
+    let streamError
+    try {
+      const stream = ctx.llm.stream({ ...built.options, messages, signal: deadline })
+      for await (const chunk of stream) assembler.push(chunk)
+    } catch (error) {
+      streamError = error
     }
-    return finish(PREDICTION_REASONS.toolRejected)
-  } finally {
-    deadline.dispose()
+    usage = assembler.usage ?? usage
+
+    if (deadline.aborted) return finish(stopReason())
+    if (streamError !== undefined) {
+      // The LLM service turns adapter failures into terminal finish chunks, so
+      // this path is a consumer/middleware failure: silent, never throw.
+      ctx.logger?.debug?.('followup-prompt: stream failed: %s', String(streamError?.message ?? streamError))
+      return finish(PREDICTION_REASONS.error)
+    }
+
+    let blocks
+    try {
+      blocks = assembler.blocks()
+    } catch (error) {
+      // `blocks()` throws on an unknown block type left unclosed: treat as error.
+      ctx.logger?.debug?.('followup-prompt: assembly failed: %s', String(error?.message ?? error))
+      return finish(PREDICTION_REASONS.error)
+    }
+    const terminal = assembler.finish
+    const calls = blocks.filter((block) => block.type === 'tool-call')
+
+    if (calls.length === 0) {
+      if (terminal.kind === 'aborted') return finish(stopReason())
+      if (terminal.kind === 'max-tokens') return finish(PREDICTION_REASONS.maxTokens)
+      if (terminal.kind !== 'stop') return finish(PREDICTION_REASONS.error)
+      const text = blocks.filter((block) => block.type === 'text').map((block) => block.text).join('')
+      const suggestion = normalizeSuggestion(text, config)
+      const result = { suggestion, ...base, usage }
+      logPrediction(ctx, session, turn, config, startedAt, result, suggestion === null ? 'filtered' : 'suggested')
+      return result
+    }
+
+    base.toolRejected = true
+    if (round >= config.maxToolRejectRounds) return finish(PREDICTION_REASONS.toolRejected)
+    messages = appendToolRejections({
+      messages,
+      calls,
+      provider: built.provider,
+      model: built.model,
+      rejectionText,
+      usedCallIds,
+    })
+    if (messages === null) {
+      ctx.logger?.debug?.('followup-prompt: duplicate tool-call id; abandoning prediction')
+      return finish(PREDICTION_REASONS.toolRejected, 'duplicate-call-id')
+    }
   }
 }

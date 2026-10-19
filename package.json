@@ -31,8 +31,7 @@
     "LICENSE"
   ],
   "scripts": {
-    "check": "node verify/run-all.mjs --checks",
-    "test": "node verify/run-all.mjs",
+    "test": "node --test \"verify/*.test.mjs\"",
     "pack:dry": "pnpm pack --dry-run",
     "links": "node scripts/link-dev-deps.mjs"
   },

@@ -1,41 +1,9 @@
-#!/usr/bin/env node
-// Stub-driven smoke test: loads client.js against a fake module loader, slots, fetch and DOM.
+// Stub-driven Client tests: loads client.js against a fake module loader, slots, fetch,
+// DOM and hook runtime. Live Harness behavior: see docs/design.md §7.3.
 
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
-import { dirname, join } from 'node:path'
-import { fileURLToPath } from 'node:url'
-
-let passed = 0
-const failures = []
-
-function record(name, detail) {
-  passed += 1
-  console.log(`  \u2713 ${name}${detail === undefined ? '' : ` \u2014 ${detail}`}`)
-}
-
-function fail(name, error) {
-  failures.push({ name, detail: error instanceof Error ? error.message : String(error) })
-  console.log(`  \u2717 ${name} \u2014 ${failures[failures.length - 1].detail}`)
-}
-
-function check(name, fn) {
-  try {
-    const detail = fn()
-    record(name, detail)
-  } catch (error) {
-    fail(name, error)
-  }
-}
-
-async function checkAsync(name, fn) {
-  try {
-    const detail = await fn()
-    record(name, detail)
-  } catch (error) {
-    fail(name, error)
-  }
-}
+import { test } from 'node:test'
 
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms))
 
@@ -128,6 +96,9 @@ function createReactRuntime() {
       return active.useState(initial)
     },
     useEffect(effect, deps) {
+      active.useEffect(effect, deps)
+    },
+    useLayoutEffect(effect, deps) {
       active.useEffect(effect, deps)
     },
   }
@@ -243,7 +214,6 @@ function textOf(node) {
   if (typeof node === 'object' && node.__element === true) {
     return textOf(node.props === undefined ? undefined : node.props.children)
   }
-  return ''
 }
 
 function findElement(node, predicate) {
@@ -266,6 +236,8 @@ globalThis.Element = dom.FakeElement
 
 let loaded = null
 globalThis.window = {
+  addEventListener() {},
+  removeEventListener() {},
   __ModuleLoader__: {
     load(registration) {
       if (loaded !== null) throw new Error('client.js registered the module twice')
@@ -289,9 +261,6 @@ const localeRegistrations = []
 const slotInjections = []
 const registrations = []
 const effects = []
-const bindingById = new Map()
-const scopeById = new Map()
-const fakeServices = new Map()
 
 // ── Stubbed same-origin fetch (the only client transport) ───────────────────
 const fetchCalls = []
@@ -352,77 +321,33 @@ const fakeCtx = {
       return () => {}
     },
   },
-  sessions: {
-    binding(id) {
-      return bindingById.get(id)
-    },
-    scope(id) {
-      return scopeById.get(id)
-    },
-  },
-  get(name) {
-    return fakeServices.get(name)
-  },
 }
 
-let conversationFocusCalls = 0
-function makeConversationService() {
-  return {
-    input: {
-      for() {
-        return { focus() { conversationFocusCalls += 1 } }
-      },
-    },
-  }
-}
-
-// ═════════════════════════════════════════════════════════════════════════════
-console.log('\n[1/5] module registration and plugin face')
-check('ModuleLoader registration captured', () => {
-  assert.notEqual(loaded, null)
-  return loaded.id
-})
-check('module id is the package name', () => {
-  assert.equal(loaded.id, 'dsh-followup-prompt')
-  return loaded.id
-})
-check('factory is a function', () => {
-  assert.equal(typeof loaded.factory, 'function')
-})
-check('browser React is the only module-table read', () => {
+// ── module registration and plugin face ──
+test('ModuleLoader registration under the package id, reading only React', () => {
+  assert.equal(loaded?.id, 'dsh-followup-prompt')
   assert.deepEqual(requireCalls, ['react'])
-  return requireCalls.join(',')
 })
-check('plugin face exports inject + apply', () => {
+test('plugin face exports inject + apply', () => {
   assert.ok(plugin !== null && typeof plugin === 'object')
-  assert.deepEqual(plugin.inject, ['slots', 'sessions', 'locale'])
+  assert.deepEqual(plugin.inject, ['slots', 'locale'])
   assert.equal(typeof plugin.apply, 'function')
-  return `inject: ${plugin.inject.join(',')}`
 })
 
-console.log('\n[2/5] apply(): locale and slot registration')
-check('apply runs without throwing', () => {
-  assert.equal(typeof plugin.apply, 'function')
-  return 'apply(fakeCtx)'
-})
-try {
-  plugin.apply(fakeCtx)
-  record('apply(fakeCtx) executed')
-} catch (error) {
-  fail('apply(fakeCtx) executed', error)
-}
-check('locale dictionaries registered under the plugin namespace', () => {
+// ── apply(): locale and slot registration ──
+plugin.apply(fakeCtx)
+
+test('locale dictionaries registered under the plugin namespace', () => {
   assert.equal(localeRegistrations.length, 1)
   const [{ namespace, dictionaries }] = localeRegistrations
   assert.equal(namespace, 'followup-prompt')
   assert.ok(dictionaries.en !== undefined && dictionaries.zh !== undefined)
   assert.equal(typeof dictionaries.en['meta.title'], 'string')
   assert.equal(typeof dictionaries.zh['meta.title'], 'string')
-  assert.equal(typeof dictionaries.en['prediction.prefix'], 'string')
+  assert.equal(typeof dictionaries.en['prediction.statusAria'], 'string')
   assert.equal(typeof dictionaries.zh['prediction.acceptHint'], 'string')
-  return 'en + zh (meta.title/prediction.*)'
 })
-check('the composer input overlay slot is injected, then registered', () => {
+test('the composer input overlay slot is injected, then registered', () => {
   assert.deepEqual(slotInjections, ['conversation.input.overlay'])
   assert.equal(registrations.length, 1)
   const { options } = registrations[0]
@@ -433,24 +358,21 @@ check('the composer input overlay slot is injected, then registered', () => {
   assert.ok(options.order >= 10)
   assert.equal(typeof options.inject, 'function')
   assert.equal(typeof registrations[0].component, 'function')
-  return `id=${options.id}, order=${options.order}, locale=${options.locale}`
 })
-check('apply side effects ride ctx.effect lifetimes', () => {
+test('apply side effects ride ctx.effect lifetimes', () => {
   assert.ok(effects.length >= 2)
   assert.ok(effects.some(entry => typeof entry.label === 'string' && entry.label.includes(': dictionaries')))
-  return `${effects.length} effects`
 })
-check('keyboard capture listener installed on document', () => {
+test('keyboard capture listener installed on document', () => {
   assert.ok(dom.count('keydown') >= 1)
-  return `${dom.count('keydown')} keydown listener(s)`
 })
 
 // ── Injected transport face ─────────────────────────────────────────────────
 const injectedFace = registrations[0].options.inject('session-1')
 
-console.log('\n[3/5] injected transport face (same-origin fetch, envelope unwrap, silent failure)')
+// ── injected transport face (same-origin fetch, envelope unwrap, silent failure) ──
 
-await checkAsync('waitForSuggestion POSTs the exact Fetch route and unwraps the envelope value', async () => {
+test('waitForSuggestion POSTs the exact Fetch route and unwraps the envelope value', async () => {
   fetchCalls.length = 0
   fetchHandler = async () => jsonResponse({ ok: true, value: { suggestion: '  hello world  ', turn: 7 } })
   const result = await injectedFace.waitForSuggestion({ sessionId: 'session-1' })
@@ -462,10 +384,9 @@ await checkAsync('waitForSuggestion POSTs the exact Fetch route and unwraps the 
   assert.equal(init.credentials, 'same-origin')
   assert.deepEqual(init.headers, { 'content-type': 'application/json' })
   assert.deepEqual(JSON.parse(init.body), { endpoint: 'suggestions/wait', payload: { sessionId: 'session-1' } })
-  return 'POST api/followup-prompt/rpc, credentials=same-origin, body={endpoint,payload}'
 })
 
-await checkAsync('waitForSuggestion forwards the AbortSignal only when supplied', async () => {
+test('waitForSuggestion forwards the AbortSignal only when supplied', async () => {
   fetchCalls.length = 0
   fetchHandler = async () => jsonResponse({ ok: true, value: { suggestion: 'x', turn: 1 } })
   const controller = new AbortController()
@@ -473,16 +394,14 @@ await checkAsync('waitForSuggestion forwards the AbortSignal only when supplied'
   assert.equal(fetchCalls[0].init.signal, controller.signal)
   await injectedFace.waitForSuggestion({ sessionId: 'session-1' })
   assert.equal(fetchCalls[1].init.signal, undefined)
-  return 'signal passed through only when supplied'
 })
 
-await checkAsync('non-OK HTTP is silent idle (null)', async () => {
+test('non-OK HTTP is silent idle (null)', async () => {
   fetchHandler = async () => jsonResponse({ error: 'unavailable' }, 503)
   assert.equal(await injectedFace.waitForSuggestion({ sessionId: 'session-1' }), null)
-  return 'null on HTTP 503'
 })
 
-await checkAsync('thrown fetch / abort is silent idle (null)', async () => {
+test('thrown fetch / abort is silent idle (null)', async () => {
   fetchHandler = async () => {
     throw new Error('network error')
   }
@@ -493,10 +412,9 @@ await checkAsync('thrown fetch / abort is silent idle (null)', async () => {
     throw abort
   }
   assert.equal(await injectedFace.waitForSuggestion({ sessionId: 'session-1' }), null)
-  return 'null on network error and AbortError'
 })
 
-await checkAsync('malformed JSON is silent idle (null)', async () => {
+test('malformed JSON is silent idle (null)', async () => {
   fetchHandler = async () => ({
     ok: true,
     status: 200,
@@ -505,31 +423,27 @@ await checkAsync('malformed JSON is silent idle (null)', async () => {
     },
   })
   assert.equal(await injectedFace.waitForSuggestion({ sessionId: 'session-1' }), null)
-  return 'null'
 })
 
-await checkAsync('{ok:false} envelope is silent idle (null)', async () => {
+test('{ok:false} envelope is silent idle (null)', async () => {
   fetchHandler = async () => jsonResponse({ ok: false, error: { code: 'busy', message: 'busy', details: {} } })
   assert.equal(await injectedFace.waitForSuggestion({ sessionId: 'session-1' }), null)
-  return 'null'
 })
 
-await checkAsync('missing global fetch is silent idle (null)', async () => {
+test('missing global fetch is silent idle (null)', async () => {
   delete globalThis.fetch
   assert.equal(await injectedFace.waitForSuggestion({ sessionId: 'session-1' }), null)
   globalThis.fetch = stubFetchImplementation
-  return 'null without fetch'
 })
 
-await checkAsync('null/empty suggestion and reason-only values are silent idle', async () => {
+test('null/empty suggestion and reason-only values are silent idle', async () => {
   fetchHandler = async () => jsonResponse({ ok: true, value: { suggestion: null, turn: null, reason: 'no-completed-turn' } })
   assert.equal(await injectedFace.waitForSuggestion({ sessionId: 'session-1' }), null)
   fetchHandler = async () => jsonResponse({ ok: true, value: { suggestion: '   ', turn: 3 } })
   assert.equal(await injectedFace.waitForSuggestion({ sessionId: 'session-1' }), null)
-  return 'null'
 })
 
-await checkAsync('dismissSuggestion POSTs suggestions/dismiss fire-and-forget', async () => {
+test('dismissSuggestion POSTs suggestions/dismiss fire-and-forget', async () => {
   fetchCalls.length = 0
   fetchHandler = async () => jsonResponse({ ok: true, value: { ok: true } })
   const returned = injectedFace.dismissSuggestion({ sessionId: 'session-1', turn: 7 })
@@ -539,33 +453,14 @@ await checkAsync('dismissSuggestion POSTs suggestions/dismiss fire-and-forget', 
   assert.equal(init.method, 'POST')
   assert.deepEqual(JSON.parse(init.body), { endpoint: 'suggestions/dismiss', payload: { sessionId: 'session-1', turn: 7 } })
   if (returned !== undefined && typeof returned.then === 'function') await returned
-  return 'endpoint=suggestions/dismiss on the same route'
 })
 
-await checkAsync('dismiss transport failure is swallowed', async () => {
+test('dismiss transport failure is swallowed', async () => {
   fetchHandler = async () => {
     throw new Error('network error')
   }
   const returned = injectedFace.dismissSuggestion({ sessionId: 'session-1' })
   if (returned !== undefined && typeof returned.then === 'function') await returned
-  return 'no rejection'
-})
-
-check('focusComposer uses the session conversation service', () => {
-  conversationFocusCalls = 0
-  const actx = {
-    get(name) {
-      return name === 'conversation' ? makeConversationService() : undefined
-    },
-  }
-  bindingById.set('session-1', { ctx: actx })
-  scopeById.set('session-1', actx)
-  injectedFace.focusComposer()
-  assert.equal(conversationFocusCalls, 1)
-  bindingById.delete('session-1')
-  scopeById.delete('session-1')
-  injectedFace.focusComposer() // absent session: best-effort no-op, never throws
-  return 'focus() called once, absent session ignored'
 })
 
 // ── Component rendering + keyboard path ─────────────────────────────────────
@@ -624,7 +519,6 @@ function makeComponentProps(state, face, actions, translate) {
     t: translate === undefined ? key => `t:${key}` : translate,
     waitForSuggestion: face.waitForSuggestion,
     dismissSuggestion: face.dismissSuggestion,
-    focusComposer: face.focusComposer,
   })
   return { componentHarness, props }
 }
@@ -639,12 +533,11 @@ function dispatchTab(target, key) {
 const defaultRpc = {
   waitForSuggestion: injectedFace.waitForSuggestion,
   dismissSuggestion: injectedFace.dismissSuggestion,
-  focusComposer: injectedFace.focusComposer,
 }
 
-console.log('\n[4/5] component state machine and Tab accept (fake hook runtime)')
+// ── component state machine and Tab accept (fake hook runtime) ──
 
-await checkAsync('idle edge requests once and mounts the inline ghost', async () => {
+test('idle edge requests once and mounts the inline ghost', async () => {
   fetchCalls.length = 0
   fetchHandler = async () => jsonResponse({ ok: true, value: { suggestion: 'hello there', turn: 7 } })
   const state = makeComponentState()
@@ -666,10 +559,9 @@ await checkAsync('idle edge requests once and mounts the inline ghost', async ()
   assert.equal(actions.calls.captureInsertion, 0)
   assert.equal(actions.calls.submit, 0)
   componentHarness.unmount()
-  return 'role=status, one suggestions/wait, suggestion rendered'
 })
 
-await checkAsync('Tab inside the composer accepts into the draft and never sends', async () => {
+test('Tab inside the composer accepts into the draft and never sends', async () => {
   fetchCalls.length = 0
   fetchHandler = async () => jsonResponse({ ok: true, value: { suggestion: 'hello there', turn: 7 } })
   const state = makeComponentState()
@@ -682,13 +574,9 @@ await checkAsync('Tab inside the composer accepts into the draft and never sends
     face.dismissPayload = payload
     return Promise.resolve()
   }
-  let focusCalls = 0
-  face.focusComposer = () => { focusCalls += 1 }
   const { componentHarness, props } = makeComponentProps(state, face, actions)
   let element = await settle(componentHarness, registrations[0].component, props)
   assert.notEqual(element, null)
-  const focusedEditor = new dom.FakeElement(true)
-  dom.document.activeElement = focusedEditor
   const event = dispatchTab(new dom.FakeElement(true))
   assert.equal(event.defaultPrevented, true)
   assert.equal(event.propagationStopped, true)
@@ -696,17 +584,14 @@ await checkAsync('Tab inside the composer accepts into the draft and never sends
   assert.deepEqual(actions.calls.insertText, [{ text: 'hello there', span: { start: 0, end: 0, draftRev: 4 } }])
   assert.deepEqual(actions.calls.setDraft, [])
   assert.equal(actions.calls.submit, 0)
-  assert.equal(focusCalls, 0, 'Tab accept must not re-focus an already focused editor')
   assert.deepEqual(face.dismissPayload, { sessionId: 'session-1', turn: 7 })
-  dom.document.activeElement = null
   // The ghost clears after accepting.
   element = await settle(componentHarness, registrations[0].component, props)
   assert.equal(element, null)
   componentHarness.unmount()
-  return 'insertText only; dismiss sent; submit never called'
 })
 
-await checkAsync('Tab outside the composer input is let through', async () => {
+test('Tab outside the composer input is let through', async () => {
   fetchCalls.length = 0
   fetchHandler = async () => jsonResponse({ ok: true, value: { suggestion: 'hello there', turn: 7 } })
   const state = makeComponentState()
@@ -717,10 +602,9 @@ await checkAsync('Tab outside the composer input is let through', async () => {
   assert.equal(event.defaultPrevented, false)
   assert.equal(actions.calls.insertText.length, 0)
   componentHarness.unmount()
-  return 'no preventDefault outside [data-composer-input]'
 })
 
-await checkAsync('non-empty draft: no request, nothing rendered, Tab passes', async () => {
+test('non-empty draft: no request, nothing rendered, Tab passes', async () => {
   fetchCalls.length = 0
   fetchHandler = async () => jsonResponse({ ok: true, value: { suggestion: 'hello there', turn: 7 } })
   const state = makeComponentState({ input: { draft: 'typed by the user' } })
@@ -732,10 +616,9 @@ await checkAsync('non-empty draft: no request, nothing rendered, Tab passes', as
   assert.equal(event.defaultPrevented, false)
   assert.equal(actions.calls.insertText.length, 0)
   componentHarness.unmount()
-  return 'null, zero RPC, Tab untouched'
 })
 
-await checkAsync('blank / awaiting-first-turn sessions never request', async () => {
+test('blank / awaiting-first-turn sessions never request', async () => {
   fetchCalls.length = 0
   fetchHandler = async () => jsonResponse({ ok: true, value: { suggestion: 'hello there', turn: 7 } })
   for (const flags of [{ blank: true }, { awaitingFirstTurn: true }, { running: true }]) {
@@ -746,10 +629,9 @@ await checkAsync('blank / awaiting-first-turn sessions never request', async () 
     componentHarness.unmount()
   }
   assert.equal(waitCallCount(), 0)
-  return 'blank / awaitingFirstTurn / running: no requests'
 })
 
-await checkAsync('failed suggestion request stays silent', async () => {
+test('failed suggestion request stays silent', async () => {
   fetchCalls.length = 0
   fetchHandler = async () => {
     throw new Error('network error')
@@ -759,10 +641,9 @@ await checkAsync('failed suggestion request stays silent', async () => {
   const { componentHarness, props } = makeComponentProps(state, defaultRpc, actions)
   assert.equal(await settle(componentHarness, registrations[0].component, props), null)
   componentHarness.unmount()
-  return 'null'
 })
 
-await checkAsync('insertText returning false: Tab is not consumed and nothing is dismissed', async () => {
+test('insertText returning false: Tab is not consumed and nothing is dismissed', async () => {
   fetchCalls.length = 0
   fetchHandler = async () => jsonResponse({ ok: true, value: { suggestion: 'hello there', turn: 7 } })
   const state = makeComponentState()
@@ -774,7 +655,6 @@ await checkAsync('insertText returning false: Tab is not consumed and nothing is
       dismissCalls.push(payload)
       return Promise.resolve()
     },
-    focusComposer: injectedFace.focusComposer,
   }, actions)
   const element = await settle(componentHarness, registrations[0].component, props)
   assert.notEqual(element, null)
@@ -783,35 +663,9 @@ await checkAsync('insertText returning false: Tab is not consumed and nothing is
   assert.equal(dismissCalls.length, 0)
   assert.deepEqual(actions.calls.setDraft, [])
   componentHarness.unmount()
-  return 'no preventDefault, no dismiss, no destructive setDraft'
 })
 
-await checkAsync('setDraft fallback is used only when the insertion pair is absent', async () => {
-  fetchCalls.length = 0
-  fetchHandler = async () => jsonResponse({ ok: true, value: { suggestion: 'hello there', turn: 7 } })
-  const state = makeComponentState()
-  const actions = makeInputActions()
-  const legacyActions = { setDraft: actions.actions.setDraft }
-  const dismissCalls = []
-  const { componentHarness, props } = makeComponentProps(state, {
-    waitForSuggestion: injectedFace.waitForSuggestion,
-    dismissSuggestion: payload => {
-      dismissCalls.push(payload)
-      return Promise.resolve()
-    },
-    focusComposer: injectedFace.focusComposer,
-  }, { actions: legacyActions, calls: actions.calls })
-  assert.notEqual(await settle(componentHarness, registrations[0].component, props), null)
-  const event = dispatchTab(new dom.FakeElement(true))
-  assert.equal(event.defaultPrevented, true)
-  assert.deepEqual(actions.calls.setDraft, ['hello there'])
-  assert.equal(dismissCalls.length, 1)
-  assert.equal(actions.calls.submit, 0)
-  componentHarness.unmount()
-  return 'setDraft fallback applied'
-})
-
-await checkAsync('running true hides and a later idle edge asks again', async () => {
+test('running true hides and a later idle edge asks again', async () => {
   fetchCalls.length = 0
   fetchHandler = async () => jsonResponse({ ok: true, value: { suggestion: 'hello there', turn: 7 } })
   const state = makeComponentState()
@@ -829,10 +683,26 @@ await checkAsync('running true hides and a later idle edge asks again', async ()
   const after = waitCallCount()
   assert.equal(after, before + 1)
   componentHarness.unmount()
-  return 'hidden on running, one new request on the next idle edge'
 })
 
-await checkAsync('draft typing hides; clearing the draft re-shows from cache without a new RPC', async () => {
+test('switching sessions drops the old ghost and asks for the new session', async () => {
+  fetchCalls.length = 0
+  fetchHandler = async (url, init) => {
+    const { payload } = JSON.parse(init.body)
+    return jsonResponse({ ok: true, value: { suggestion: `for ${payload.sessionId}`, turn: 1 } })
+  }
+  const state = makeComponentState()
+  const actions = makeInputActions()
+  const { componentHarness, props } = makeComponentProps(state, defaultRpc, actions)
+  assert.ok(textOf(await settle(componentHarness, registrations[0].component, props)).includes('for session-1'))
+  props.sessionId = 'session-2'
+  const element = await settle(componentHarness, registrations[0].component, props)
+  assert.ok(textOf(element).includes('for session-2'))
+  assert.equal(waitCallCount(), 2)
+  componentHarness.unmount()
+})
+
+test('draft typing hides; clearing the draft re-shows from cache without a new RPC', async () => {
   fetchCalls.length = 0
   fetchHandler = async () => jsonResponse({ ok: true, value: { suggestion: 'hello there', turn: 7 } })
   const state = makeComponentState()
@@ -847,10 +717,9 @@ await checkAsync('draft typing hides; clearing the draft re-shows from cache wit
   const requestsAfterRestore = waitCallCount()
   assert.equal(requestsAfterRestore, requestsAfterMount)
   componentHarness.unmount()
-  return 'same-turn cached re-show, no second request'
 })
 
-await checkAsync('IME composition hides the bar and shows it again after the grace period', async () => {
+test('IME composition hides the bar and shows it again after the grace period', async () => {
   fetchCalls.length = 0
   fetchHandler = async () => jsonResponse({ ok: true, value: { suggestion: 'hello there', turn: 7 } })
   const state = makeComponentState()
@@ -864,10 +733,9 @@ await checkAsync('IME composition hides the bar and shows it again after the gra
   await delay(25)
   assert.notEqual(await settle(componentHarness, registrations[0].component, props), null)
   componentHarness.unmount()
-  return 'hidden during composition, restored 10ms after compositionend'
 })
 
-await checkAsync('close button dismisses and clears the bar', async () => {
+test('close button dismisses and clears the bar', async () => {
   fetchCalls.length = 0
   fetchHandler = async () => jsonResponse({ ok: true, value: { suggestion: 'hello there', turn: 7 } })
   const state = makeComponentState()
@@ -879,7 +747,6 @@ await checkAsync('close button dismisses and clears the bar', async () => {
       dismissCalls.push(payload)
       return Promise.resolve()
     },
-    focusComposer: injectedFace.focusComposer,
   }, actions)
   let element = await settle(componentHarness, registrations[0].component, props)
   assert.notEqual(element, null)
@@ -893,10 +760,9 @@ await checkAsync('close button dismisses and clears the bar', async () => {
   element = await settle(componentHarness, registrations[0].component, props)
   assert.equal(element, null)
   componentHarness.unmount()
-  return 'dismissed + cleared'
 })
 
-await checkAsync('Escape closes the bar through the capture listener', async () => {
+test('Escape closes the bar through the capture listener', async () => {
   fetchCalls.length = 0
   fetchHandler = async () => jsonResponse({ ok: true, value: { suggestion: 'hello there', turn: 7 } })
   const state = makeComponentState()
@@ -908,10 +774,9 @@ await checkAsync('Escape closes the bar through the capture listener', async () 
   const element = await settle(componentHarness, registrations[0].component, props)
   assert.equal(element, null)
   componentHarness.unmount()
-  return 'Escape consumed only while the bar is visible'
 })
 
-await checkAsync('an open command menu keeps Tab for itself', async () => {
+test('an open command menu keeps Tab for itself', async () => {
   fetchCalls.length = 0
   fetchHandler = async () => jsonResponse({ ok: true, value: { suggestion: 'hello there', turn: 7 } })
   const state = makeComponentState()
@@ -929,33 +794,20 @@ await checkAsync('an open command menu keeps Tab for itself', async () => {
   assert.equal(actions.calls.insertText.length, 1)
   dom.setVisiblePopups([])
   componentHarness.unmount()
-  return 'visible listbox/menu lets Tab pass; hidden menu does not'
 })
 
-console.log('\n[5/5] client source contract guards')
-const root = join(dirname(fileURLToPath(import.meta.url)), '..')
-const source = readFileSync(join(root, 'client.js'), 'utf8')
-check('never calls a submission entry point', () => {
+// ── client source contract guards ──
+const source = readFileSync(new URL('../client.js', import.meta.url), 'utf8')
+test('never calls a submission entry point', () => {
   assert.ok(!/\.submit\s*\(/.test(source))
   assert.ok(!/\bsubmit\s*\(/.test(source))
-  return 'no submit call'
 })
-check('does not mutate the editor DOM', () => {
+test('does not mutate the editor DOM', () => {
   assert.ok(!/['"]contentEditable['"]\s*:/.test(source))
   assert.ok(!/insertAdjacentHTML|innerHTML\s*=/.test(source))
   assert.ok(!/\.setAttribute\s*\(/.test(source))
-  return 'no DOM mutation'
 })
-check('client transport is the same-origin exact Fetch route (no connection service)', () => {
-  assert.ok(source.includes("'api/followup-prompt/rpc'"))
-  assert.ok(source.includes("credentials: 'same-origin'"))
-  assert.ok(/method:\s*'POST'/.test(source))
-  assert.ok(/fetch\(\s*'api\/followup-prompt\/rpc'\s*,\s*init\s*\)/.test(source))
-  assert.ok(!/ctx\.connection\.rpc\.call/.test(source))
-  assert.ok(!/inject:\s*\[[^\]]*'connection'/.test(source))
-  return 'POST api/followup-prompt/rpc; no connection service'
-})
-check('only shipped theme alias tokens are referenced', () => {
+test('only shipped theme alias tokens are referenced', () => {
   const allowed = new Set([
     '--dsw-alias-bg-base',
     '--dsw-alias-bg-layer-1',
@@ -977,16 +829,4 @@ check('only shipped theme alias tokens are referenced', () => {
   assert.deepEqual(unknown, [])
   assert.ok(used.has('--dsw-alias-bg-layer-1'))
   assert.ok(used.has('--dsw-alias-border-l1'))
-  return `${used.size} token(s), all shipped`
 })
-
-// ── Summary ─────────────────────────────────────────────────────────────────
-console.log('\n──────────────────────────────────────────────')
-if (failures.length === 0) {
-  console.log(`CLIENT SMOKE PASSED: ${passed} checks.`)
-  console.log('Stub-driven contract check only; live Harness behavior: see docs/design.md \u00a77.3.')
-  process.exit(0)
-}
-console.log(`CLIENT SMOKE FAILED: ${failures.length} failure(s), ${passed} passed.`)
-for (const failure of failures) console.log(`  - ${failure.name}: ${failure.detail}`)
-process.exit(1)
