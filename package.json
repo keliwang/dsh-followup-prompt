@@ -1,6 +1,6 @@
 {
   "name": "dsh-followup-prompt",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Followup Prompt for DeepSeek Harness: predicts your next message after each completed turn and offers it as an editable draft (Tab to accept, never auto-send).",
   "keywords": [
     "dsh-plugin",
