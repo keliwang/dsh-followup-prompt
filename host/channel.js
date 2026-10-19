@@ -1,17 +1,23 @@
 /**
- * Connection RPC channel for the Followup Prompt.
+ * Host HTTP route for the Followup Prompt.
  *
- * DSH's authenticated Connection transport gives the browser half one
- * loopback-only, cookie-authenticated unary RPC channel: the Host registers
- * `/followup-prompt` with `ctx.connection.rpc.handle(channel, handler)` (which
- * registers through `owner.webServer.register`, hence the `webServer` inject),
- * and the browser calls `connection.rpc.call('/followup-prompt', endpoint,
- * payload, signal)`. Every field is validated at this wire boundary, and the
- * handler never throws: unexpected failures become a protocol failure envelope.
+ * DSH ships one authenticated shared API channel at `/api`; a Host feature
+ * contributes an exact Fetch route on it with
+ * `ctx.connection.fetch.register({ path, methods, requestBody, fetch })`. The
+ * route is hosted by the Connection plugin (so no `webServer` injection is
+ * needed on the calling plugin), is reachable only by the owner Peer, and
+ * inherits the Host/Origin fence, browser-cookie authentication, and buffered
+ * JSON body handling of the shared channel. This is the same mechanism the
+ * shipped feature plugins and the installed third-party `ds-bot` bundle use.
  *
- * Endpoints (`dsh-followup-prompt-plan.md` §3.1, `docs/protocol.md`):
- * - `suggestions/wait`    long-poll for the latest completed turn's suggestion
- * - `suggestions/dismiss` mark the turn accepted/closed (idempotent)
+ * Wire contract (`docs/protocol.md`, `dsh-followup-prompt-plan.md` §3.1):
+ * - `POST /api/followup-prompt/rpc`
+ * - body `{ endpoint: 'suggestions/wait' | 'suggestions/dismiss', payload }`
+ * - HTTP 200 JSON envelope `{ ok: true, value }` or
+ *   `{ ok: false, error: { code, message, details } }`
+ *
+ * Every field is validated at this wire boundary, the handler never throws,
+ * and `request.signal` (client disconnect) cancels the long poll.
  *
  * @module dsh-followup-prompt/host/channel
  */
@@ -19,8 +25,8 @@
 import { resolveConfig } from './config.js'
 import { isSubagentSession, latestCompletedTurn } from './cache.js'
 
-/** Registered absolute channel prefix (`/api` is reserved by the gateway). */
-export const CHANNEL = '/followup-prompt'
+/** Exact Fetch route on the shared authenticated `/api` channel. */
+export const ROUTE = '/api/followup-prompt/rpc'
 
 /** Long-poll endpoint: fetch (or wait for) the suggestion of the latest completed turn. */
 export const ENDPOINT_WAIT = 'suggestions/wait'
@@ -46,6 +52,15 @@ export const ERROR_INTERNAL = 'followup-prompt/internal'
  */
 function failure(code, message, details = {}) {
   return { ok: false, error: { code, message, details } }
+}
+
+/**
+ * Wrap one envelope as an HTTP 200 JSON response.
+ * @param {{ ok: boolean }} envelope - protocol envelope.
+ * @returns {Response} the JSON response.
+ */
+function jsonResponse(envelope) {
+  return Response.json(envelope)
 }
 
 /**
@@ -135,7 +150,7 @@ function lookupSession(ctx, sessionId) {
  * @param {object} input.cache - PredictionCache.
  * @param {() => object} input.getConfig - live config reader.
  * @param {{ sessionId: string, turn: number | undefined, waitMs: number }} input.request - validated payload.
- * @param {AbortSignal | undefined} input.signal - transport cancellation.
+ * @param {AbortSignal | undefined} input.signal - client-disconnect cancellation.
  * @returns {Promise<{ suggestion: string | null, turn: number | null, reason?: string }>} protocol value.
  */
 async function waitForSuggestion({ ctx, cache, getConfig, request, signal }) {
@@ -174,48 +189,84 @@ function dismissSuggestion({ ctx, cache, request }) {
 }
 
 /**
- * Create the `/followup-prompt` Connection RPC handler.
+ * Create the `/api/followup-prompt/rpc` exact Fetch route.
  *
- * The handler accepts the four transport arguments
- * `(endpoint, payload, signal, peer)`; `peer` is intentionally unused (the
- * Connection adapter already authenticated the request). It never throws: an
- * unexpected exception maps to `followup-prompt/internal`.
+ * The returned route object is passed straight to
+ * `ctx.connection.fetch.register(route)` inside `ctx.effect`, so the
+ * registration is removed with the plugin fiber. The `fetch` handler reads the
+ * buffered JSON body, dispatches one endpoint, and always answers HTTP 200
+ * with a protocol envelope — a malformed body or endpoint is a `bad-request`,
+ * an unknown endpoint is a `bad-endpoint`, and an unexpected exception is
+ * `internal`. It never throws.
  *
- * @param {object} options - handler dependencies.
+ * @param {object} options - route dependencies.
  * @param {object} options.ctx - plugin context (`sessions`, `logger`).
  * @param {object | (() => object)} options.config - resolved config snapshot, or the live
  *   resolved-config reader (preferred, so Settings changes apply immediately).
  * @param {object} options.cache - PredictionCache instance.
- * @returns {(endpoint: string, payload: unknown, signal?: AbortSignal, peer?: unknown) =>
- *   Promise<{ ok: true, value: object } | { ok: false, error: object }>} the RPC handler.
+ * @returns {{ path: string, methods: ['POST'], requestBody: 'buffered',
+ *   fetch: (request: Request) => Promise<Response> }} the Fetch route object.
  */
-export function createChannelHandler({ ctx, config, cache }) {
+export function createFetchRoute({ ctx, config, cache }) {
   const getConfig = typeof config === 'function' ? config : () => resolveConfig(config)
-  return async function followupPromptHandler(endpoint, payload, signal) {
-    try {
-      if (endpoint !== ENDPOINT_WAIT && endpoint !== ENDPOINT_DISMISS) {
-        return failure(
-          ERROR_BAD_ENDPOINT,
-          `unknown endpoint ${typeof endpoint === 'string' ? JSON.stringify(endpoint) : typeof endpoint}`,
-        )
+
+  /**
+   * Dispatch one decoded request body.
+   * @param {unknown} body - decoded JSON body.
+   * @param {AbortSignal | undefined} signal - client-disconnect cancellation.
+   * @returns {Promise<object>} protocol envelope.
+   */
+  const dispatch = async (body, signal) => {
+    if (!isPlainObject(body)) return failure(ERROR_BAD_REQUEST, 'request body must be a JSON object')
+    const endpoint = body.endpoint
+    if (typeof endpoint !== 'string' || endpoint.length === 0) {
+      return failure(ERROR_BAD_REQUEST, 'endpoint must be a non-empty string')
+    }
+    if (endpoint === ENDPOINT_WAIT) {
+      const request = parseWaitRequest(body.payload)
+      if (request === null) return failure(ERROR_BAD_REQUEST, 'invalid suggestions/wait payload')
+      return {
+        ok: true,
+        value: await waitForSuggestion({ ctx, cache, getConfig, request, signal }),
       }
-      if (endpoint === ENDPOINT_WAIT) {
-        const request = parseWaitRequest(payload)
-        if (request === null) return failure(ERROR_BAD_REQUEST, 'invalid suggestions/wait payload')
-        return { ok: true, value: await waitForSuggestion({ ctx, cache, getConfig, request, signal }) }
-      }
-      const request = parseDismissRequest(payload)
+    }
+    if (endpoint === ENDPOINT_DISMISS) {
+      const request = parseDismissRequest(body.payload)
       if (request === null) return failure(ERROR_BAD_REQUEST, 'invalid suggestions/dismiss payload')
       return { ok: true, value: dismissSuggestion({ ctx, cache, request }) }
-    } catch (error) {
-      // Transport-level callers treat a thrown handler as HTTP 500; map to a
-      // protocol failure instead so the client can stay silent by contract.
-      try {
-        ctx.logger?.debug?.('followup-prompt: rpc handler failed: %s', String(error?.message ?? error).slice(0, 500))
-      } catch {
-        // logging must never break the response
-      }
-      return failure(ERROR_INTERNAL, 'internal error')
     }
+    return failure(ERROR_BAD_ENDPOINT, `unknown endpoint ${JSON.stringify(endpoint)}`)
+  }
+
+  return {
+    path: ROUTE,
+    methods: ['POST'],
+    requestBody: 'buffered',
+    fetch: async (request) => {
+      // The route declares POST only; this guard keeps a direct in-process
+      // caller honest without pretending another method is supported.
+      if (request.method !== 'POST') {
+        return new Response('method not allowed', { status: 405, headers: { allow: 'POST' } })
+      }
+      let body
+      try {
+        body = await request.json()
+      } catch {
+        return jsonResponse(failure(ERROR_BAD_REQUEST, 'request body must be JSON'))
+      }
+      try {
+        return jsonResponse(await dispatch(body, request.signal))
+      } catch (error) {
+        // Every expected failure is mapped above; this is a bug or unexpected
+        // runtime failure. Never throw (the transport would answer 500), log a
+        // short non-sensitive line, and stay silent to the client.
+        try {
+          ctx.logger?.debug?.('followup-prompt: api route failed: %s', String(error?.message ?? error).slice(0, 500))
+        } catch {
+          // logging must never break the response
+        }
+        return jsonResponse(failure(ERROR_INTERNAL, 'internal error'))
+      }
+    },
   }
 }

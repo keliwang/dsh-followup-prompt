@@ -322,9 +322,13 @@ try {
   const injectMatch = host.match(/export\s+const\s+inject\s*=\s*\[([^\]]*)\]/)
   if (injectMatch === null) throw new Error('host inject export is missing')
   const injectNames = [...injectMatch[1].matchAll(/['"]([^'"]+)['"]/g)].map((match) => match[1])
-  for (const required of ['connection', 'llm', 'sessions', 'webServer']) {
+  for (const required of ['connection', 'llm', 'sessions']) {
     if (!injectNames.includes(required)) throw new Error(`host inject is missing "${required}"`)
   }
+  // The RPC-channel registration path is unusable on 0.2.1 (it reads webServer
+  // from the Connection service's own context); the /api Fetch route is the
+  // transport, so webServer must not be a dependency.
+  if (injectNames.includes('webServer')) throw new Error('host inject must not require webServer (use the /api Fetch route)')
   if (!/export\s+const\s+Config\b/.test(host)) throw new Error('host Config export is missing')
   if (!/export\s+function\s+apply\s*\(/.test(host)) throw new Error('host apply export is missing')
   pass('host entry contract', `name / inject [${injectNames.join(', ')}] / Config / apply`)
@@ -343,6 +347,10 @@ try {
   if (!client.includes("'conversation.composer.dock'")) throw new Error('composer dock slot is not registered')
   if (!client.includes("'suggestions/wait'")) throw new Error('suggestions/wait endpoint is not called')
   if (!client.includes("'suggestions/dismiss'")) throw new Error('suggestions/dismiss endpoint is not called')
+  if (!/fetch\(\s*['"]api\/followup-prompt\/rpc['"]/.test(client)) {
+    throw new Error('client does not POST to api/followup-prompt/rpc')
+  }
+  if (!/credentials:\s*['"]same-origin['"]/.test(client)) throw new Error('client fetch is missing credentials: same-origin')
   if (!client.includes('data-composer-input')) throw new Error('[data-composer-input] accept gate is missing')
   if (/\.submit\s*\(/.test(client)) throw new Error('client must never call submit()')
   if (/\bcontenteditable\b/.test(client) && !/data-composer-input/.test(client)) {

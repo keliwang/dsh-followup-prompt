@@ -5,17 +5,31 @@ browser half must be changed together; this document is the shared contract.
 
 ## Transport
 
-- The browser calls the Host through DSH's own authenticated Connection RPC:
-  `ctx.connection.rpc.call('/followup-prompt', endpoint, payload, signal)`.
-- The Host registers the channel with `ctx.connection.rpc.handle('/followup-prompt', handler)`
-  inside `ctx.effect(...)`; registration goes through `owner.webServer.register`, so the Host
-  plugin must inject `webServer`. Channel names are `^/[A-Za-z0-9._~-]+$` and `/api` is reserved.
-- `handler(endpoint, payload, signal, peer) => Promise<{ ok: true, value } | { ok: false, error }>`.
-- Unary only, POST/JSON, same-origin loopback; browser cookie / process token authentication is
-  handled by Connection. A transport failure (HTTP 401/403/404/500, network abort) is thrown to the
-  caller; the Client treats any failure as "no suggestion".
-- Payloads are JSON. The Host validates every field at the wire boundary and never throws from the
-  handler (unexpected exceptions are mapped to `followup-prompt/internal`).
+- Browser → Host: same-origin `POST /api/followup-prompt/rpc`, an **exact Fetch route** registered by
+  the Host half with `ctx.connection.fetch.register({ path, methods: ['POST'], requestBody: 'buffered', fetch })`
+  inside `ctx.effect(...)`. The client uses `fetch('api/followup-prompt/rpc', …)` (relative URL).
+- Why not the generic Connection RPC channel: on the live 0.2.1-rc.2 Harness, activating a profile
+  bundle that calls `ctx.connection.rpc.handle('/followup-prompt', handler)` fails with
+  `cannot get property "webServer" without inject` — the RPC registrar captures the Connection
+  service's own context (which injects only `credentials`) and then calls `owner.webServer.register`,
+  so the caller's `webServer` injection is never consulted. No in-repo plugin uses `rpc.handle`;
+  in-repo plugins and the installed third-party `ds-bot` bundle all use exact Fetch routes. This is
+  also why the Host half injects `['connection','llm','sessions']` and no `webServer`.
+- The route lives under `/api`, so it inherits the same Host/Origin trust fence, browser-cookie
+  authentication, body limit, and request cancellation as the rest of the DSH API. Only owner
+  Peers reach the route.
+- Request body (JSON, POST):
+
+  ```jsonc
+  { "endpoint": "suggestions/wait", "payload": { /* endpoint payload */ } }
+  ```
+
+- Response: **HTTP 200** with a JSON envelope, either `{ "ok": true, "value": … }` or
+  `{ "ok": false, "error": { "code", "message", "details" } }`. The Client treats any non-200,
+  network/abort, malformed-JSON, or `ok:false` result as "no suggestion" (silent).
+- The Host validates every field at this wire boundary and never throws from the route handler
+  (unexpected exceptions map to `followup-prompt/internal`). `request.signal` carries the caller's
+  cancellation into the long poll.
 
 ## Endpoints
 
@@ -77,7 +91,7 @@ fire-and-forget from the Client's perspective.
 
 ## Error envelope
 
-Handler-level failures use the Connection failure shape:
+Business failures use the JSON result envelope (still HTTP 200):
 
 ```jsonc
 { "ok": false, "error": { "code": "followup-prompt/bad-request", "message": "…", "details": {} } }

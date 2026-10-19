@@ -12,8 +12,8 @@
         enabled: true
         provider: ''
         model: ''
-        reasoningEffort: ''
-        maxTokens: 160
+        reasoningEffort: 'off'
+        maxTokens: 400
         timeoutMs: 15000
         maxTurns: 0
         maxInputChars: 20000

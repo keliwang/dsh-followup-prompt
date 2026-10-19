@@ -4,12 +4,12 @@
  *
  * This is an offline contract/assembly check, not a live-Harness behavior
  * check. It imports the real Host plugin modules, drives them with a stub
- * `ctx` (listeners, effects, a fake Connection RPC registry, a fake session
- * store, and a fake `ctx.llm.stream`), and asserts the Host-side plan
+ * `ctx` (listeners, effects, a fake Connection Fetch-route registry, a fake
+ * session store, and a fake `ctx.llm.stream`), and asserts the Host-side plan
  * (`dsh-followup-prompt-plan.md` §4, `docs/protocol.md`):
  *
  *  - entry contract: name / inject / Config / apply;
- *  - exactly one channel registered under `/followup-prompt`;
+ *  - exactly one exact Fetch route registered under `/api/followup-prompt/rpc`;
  *  - `turn/end(completed)` with prefetch off makes zero model calls, and the
  *    following `suggestions/wait` makes exactly one;
  *  - a cached turn is served without another model call;
@@ -47,7 +47,13 @@ import {
   normalizeSuggestion,
   trimRequestMessages,
 } from '../host/prediction.js'
-import { CHANNEL, DEFAULT_WAIT_MS, MAX_WAIT_MS } from '../host/channel.js'
+import {
+  DEFAULT_WAIT_MS,
+  ERROR_BAD_ENDPOINT,
+  ERROR_BAD_REQUEST,
+  MAX_WAIT_MS,
+  ROUTE,
+} from '../host/channel.js'
 
 const DEFAULT_SUGGESTION = 'Add a unit test for the guard'
 
@@ -236,12 +242,12 @@ async function* toolCallChunks(calls) {
  * @param {object} options - harness options.
  * @param {object} [options.config] - raw plugin config (plain values are accepted).
  * @param {(options: object, callIndex: number) => AsyncIterable<object>} [options.streams] - fake model streams.
- * @returns {object} the harness: ctx, sessions, calls, channels, emit, disposeAll.
+ * @returns {object} the harness: ctx, sessions, calls, routes, emit, disposeAll.
  */
 function createHarness(options = {}) {
   const listeners = new Map()
   const effects = []
-  const channels = new Map()
+  const routes = new Map()
   const sessions = new Map()
   const calls = []
   const config = options.config ?? { ...DEFAULTS }
@@ -262,12 +268,13 @@ function createHarness(options = {}) {
       }
     },
     connection: {
-      rpc: {
-        handle(channel, handler) {
-          if (channels.has(channel)) throw new Error(`duplicate channel registration: ${channel}`)
-          channels.set(channel, handler)
+      fetch: {
+        register(route) {
+          if (route === null || typeof route !== 'object') throw new Error('fetch.register: invalid route')
+          if (routes.has(route.path)) throw new Error(`duplicate fetch route registration: ${route.path}`)
+          routes.set(route.path, route)
           return async () => {
-            channels.delete(channel)
+            routes.delete(route.path)
           }
         },
       },
@@ -292,7 +299,7 @@ function createHarness(options = {}) {
     config,
     sessions,
     calls,
-    channels,
+    routes,
     effects,
     /** Register a fake live session. */
     addSession(session) {
@@ -307,11 +314,11 @@ function createHarness(options = {}) {
     emitDisposed(session) {
       for (const listener of listeners.get('session/disposed') ?? []) listener(session)
     },
-    /** The registered channel handler. */
-    get handler() {
-      const handler = channels.get(CHANNEL)
-      if (handler === undefined) throw new Error('channel handler is not registered')
-      return handler
+    /** The registered exact Fetch route under ROUTE. */
+    get route() {
+      const route = routes.get(ROUTE)
+      if (route === undefined) throw new Error(`fetch route ${ROUTE} is not registered`)
+      return route
     },
     /** Dispose every plugin effect in reverse order (fiber unload). */
     async disposeAll() {
@@ -324,9 +331,9 @@ function createHarness(options = {}) {
   return harness
 }
 
-/** Unwrap a successful RPC envelope. */
+/** Unwrap a successful protocol envelope. */
 function valueOf(result) {
-  assert(result !== null && typeof result === 'object', 'handler returned no envelope')
+  assert(result !== null && typeof result === 'object', 'route returned no envelope')
   assert(result.ok === true, `expected ok:true envelope, observed ${JSON.stringify(result)}`)
   return result.value
 }
@@ -340,14 +347,52 @@ function assertFailure(result, code, label) {
   assert(result.error?.details !== null && typeof result.error?.details === 'object', `${label}: error details`)
 }
 
-/** Call the wait endpoint through the captured RPC handler. */
-function wait(harness, payload, signal) {
-  return harness.handler('suggestions/wait', payload, signal)
+/**
+ * One HTTP-shaped exchange with the captured Fetch route.
+ * @param {object} harness - harness instance.
+ * @param {unknown} body - JSON-serializable body, or a raw string body.
+ * @param {{ method?: string, signal?: AbortSignal }} [options] - method/signal.
+ * @returns {Promise<object>} decoded JSON envelope.
+ */
+async function post(harness, body, options = {}) {
+  const init = {
+    method: options.method ?? 'POST',
+    headers: { 'content-type': 'application/json' },
+    ...(body === undefined ? {} : { body: typeof body === 'string' ? body : JSON.stringify(body) }),
+  }
+  if (options.signal !== undefined) init.signal = options.signal
+  const request = new Request(`http://127.0.0.1:57434${ROUTE}`, init)
+  const response = await harness.route.fetch(request)
+  assertEqual(response.status, 200, 'route answers HTTP 200 for protocol results')
+  assert(
+    (response.headers.get('content-type') ?? '').includes('application/json'),
+    'route answers JSON',
+  )
+  return response.json()
 }
 
-/** Call the dismiss endpoint through the captured RPC handler. */
+/**
+ * Call one endpoint through the exact Fetch route.
+ * @param {object} harness - harness instance.
+ * @param {string} endpoint - wire endpoint name.
+ * @param {unknown} payload - endpoint payload (omitted when undefined).
+ * @param {AbortSignal} [signal] - client-disconnect cancellation.
+ * @returns {Promise<object>} decoded JSON envelope.
+ */
+function callEndpoint(harness, endpoint, payload, signal) {
+  const body = { endpoint }
+  if (payload !== undefined) body.payload = payload
+  return post(harness, body, signal === undefined ? {} : { signal })
+}
+
+/** Call the wait endpoint through the exact Fetch route. */
+function wait(harness, payload, signal) {
+  return callEndpoint(harness, 'suggestions/wait', payload, signal)
+}
+
+/** Call the dismiss endpoint through the exact Fetch route. */
 function dismiss(harness, payload) {
-  return harness.handler('suggestions/dismiss', payload)
+  return callEndpoint(harness, 'suggestions/dismiss', payload)
 }
 
 // ── Checks ──────────────────────────────────────────────────────────────────
@@ -360,7 +405,8 @@ async function main() {
   // ── Entry contract ───────────────────────────────────────────────────────
   await check('entry contract: name / inject / Config / apply', () => {
     assertEqual(name, 'followup-prompt', 'plugin name')
-    assertDeepEqual(inject, ['connection', 'llm', 'sessions', 'webServer'], 'inject list')
+    assertDeepEqual(inject, ['connection', 'llm', 'sessions'], 'inject list')
+    assert(!inject.includes('webServer'), 'the /api Fetch route needs no webServer injection')
     assertEqual(typeof apply, 'function', 'apply export')
     assertEqual(typeof Config, 'function', 'Config export (schemastery schema)')
     const standard = Config['~standard']
@@ -399,7 +445,7 @@ async function main() {
     assertEqual(live.enabled, false, 'volatile enabled')
     assertEqual(live.provider, 'cheap-provider', 'volatile provider trimmed')
     assertEqual(live.model, 'cheap-model', 'volatile model')
-    assertEqual(live.reasoningEffort, '', 'invalid reasoning effort falls back')
+    assertEqual(live.reasoningEffort, DEFAULTS.reasoningEffort, 'invalid reasoning effort falls back')
     assertEqual(live.maxTokens, LIMITS.maxTokens[0], 'maxTokens clamped up')
     assertEqual(live.timeoutMs, LIMITS.timeoutMs[1], 'timeoutMs capped at 30s')
     assertEqual(live.maxTurns, 0, 'maxTurns clamped')
@@ -543,17 +589,24 @@ async function main() {
   })
 
   // ── Channel registration and the lazy wait path ─────────────────────────
-  await check('channel: registered exactly once under /followup-prompt', async () => {
+  await check('route: exact POST /api/followup-prompt/rpc registered once', async () => {
     const harness = createHarness()
     try {
-      assertEqual(harness.channels.size, 1, 'one channel registered')
-      assert(harness.channels.has(CHANNEL), `channel ${CHANNEL} registered`)
-      assertEqual(typeof harness.handler, 'function', 'handler is a function')
+      assertEqual(harness.routes.size, 1, 'one Fetch route registered')
+      assert(harness.routes.has(ROUTE), `route ${ROUTE} registered`)
+      assertEqual(harness.route.path, ROUTE, 'route path')
+      // Mirrors Connection's `assertFetchRoute`/`endpointFromPath('/api', …)` shape check.
+      assert(/^\/api\/[A-Za-z0-9_$.-]+(\/[A-Za-z0-9_$.-]+)*$/.test(ROUTE), 'route path is a valid /api endpoint path')
+      assertDeepEqual(harness.route.methods, ['POST'], 'route methods')
+      assertEqual(harness.route.requestBody, 'buffered', 'route body mode')
+      assertEqual(typeof harness.route.fetch, 'function', 'route fetch handler')
       assertEqual(DEFAULT_WAIT_MS, 12000, 'default wait budget')
       assertEqual(MAX_WAIT_MS, 15000, 'maximum wait budget')
+      const methodResponse = await harness.route.fetch(new Request(`http://127.0.0.1:57434${ROUTE}`, { method: 'GET' }))
+      assertEqual(methodResponse.status, 405, 'non-POST method is rejected outside the envelope')
     } finally {
       await harness.disposeAll()
-      assertEqual(harness.channels.size, 0, 'channel removed on disposal')
+      assertEqual(harness.routes.size, 0, 'route unregistered on disposal')
     }
   })
 
@@ -747,6 +800,14 @@ async function main() {
       for (const payload of [null, [], {}, { sessionId: '' }, { sessionId: 'session-x', turn: -2 }]) {
         assertFailure(await dismiss(harness, payload), 'followup-prompt/bad-request', `dismiss ${JSON.stringify(payload)}`)
       }
+      for (const raw of ['{not json', '[]', 'null', '"text"', '']) {
+        const result = await post(harness, raw)
+        assertFailure(result, ERROR_BAD_REQUEST, `raw body ${JSON.stringify(raw)}`)
+      }
+      for (const body of [{}, { endpoint: 42 }, { endpoint: '' }, { endpoint: null }]) {
+        const result = await post(harness, body)
+        assertFailure(result, ERROR_BAD_REQUEST, `body ${JSON.stringify(body)}`)
+      }
       assertEqual(harness.calls.length, 0, 'invalid payloads never reach the model')
     } finally {
       await harness.disposeAll()
@@ -756,11 +817,12 @@ async function main() {
   await check('wire: unknown endpoint returns the bad-endpoint envelope', async () => {
     const harness = createHarness()
     try {
-      const result = await harness.handler('suggestions/get', { sessionId: 'session-x' })
-      assertFailure(result, 'followup-prompt/bad-endpoint', 'unknown endpoint')
+      const result = await callEndpoint(harness, 'suggestions/get', { sessionId: 'session-x' })
+      assertFailure(result, ERROR_BAD_ENDPOINT, 'unknown endpoint')
       assert(result.error.message.includes('suggestions/get'), 'failure names the endpoint')
-      const weird = await harness.handler(undefined, {})
-      assertFailure(weird, 'followup-prompt/bad-endpoint', 'undefined endpoint')
+      const other = await callEndpoint(harness, 'foo/bar', {})
+      assertFailure(other, ERROR_BAD_ENDPOINT, 'unknown endpoint name')
+      assertEqual(harness.calls.length, 0, 'unknown endpoints never reach the model')
     } finally {
       await harness.disposeAll()
     }
@@ -1117,7 +1179,7 @@ async function main() {
     }
   })
 
-  await check('lifecycle: disposal aborts in-flight work and unregisters the channel', async () => {
+  await check('lifecycle: disposal aborts in-flight work and unregisters the route', async () => {
     let streamAborted = false
     const harness = createHarness({
       config: { ...DEFAULTS, prefetchOnTurnEnd: true },
@@ -1141,7 +1203,7 @@ async function main() {
     await harness.disposeAll()
     await delay(20)
     assertEqual(streamAborted, true, 'plugin disposal aborted the in-flight generation')
-    assertEqual(harness.channels.size, 0, 'channel unregistered on disposal')
+    assertEqual(harness.routes.size, 0, 'route unregistered on disposal')
   })
 
   // ── Summary ──────────────────────────────────────────────────────────────

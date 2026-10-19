@@ -16,9 +16,14 @@
  * - standard props: ui-conversation contract/slots.ts (SessionStandardProps),
  *   ui-session client/index.ts (sessionId/useSession), contract/input.ts
  *   (`InputActions.captureInsertion/insertText/setDraft`, `InputState`)
- * - RPC: packages/client/connection/src/client/rpc.ts + client/index.ts
- *   (`ctx.connection.rpc.call(channel, endpoint, payload, signal)` resolves the
- *   `ConnectionRpcResult` envelope and rejects on transport failure)
+ * - transport: same-origin `POST api/followup-prompt/rpc` exactly like ds-bot's
+ *   `POST api/bot` (installed ds-bot client.js + src/host/channel.js). The Host
+ *   registers the exact Fetch route via `ctx.connection.fetch.register`
+ *   (`path: '/api/followup-prompt/rpc'`) on the shared `/api` channel, so the
+ *   browser cookie authenticates it; the body is `{endpoint, payload}` and the
+ *   response is a JSON `{ok:true,value}` / `{ok:false,error}` envelope. The
+ *   reference RPC-channel route (`ctx.connection.rpc.handle`) is not used:
+ *   profile bundles cannot inject the `webServer` service it requires.
  * - locale: packages/client/locale/src/client/index.ts (`ctx.locale.register`)
  * - editor DOM gate: the composer editor host component sets `data-composer-input`;
  *   keymap.ts sets `data-composer-composing`.
@@ -31,9 +36,8 @@ window.__ModuleLoader__.load({
     const React = require('react')
     const h = React.createElement
 
-    /** Locale namespace / loader row identity / RPC channel / slot identity. */
+    /** Locale namespace / loader row identity / slot identity. */
     const NS = 'followup-prompt'
-    const CHANNEL = '/followup-prompt'
     const SLOT = 'conversation.composer.dock'
     const SLOT_ID = 'followup-prompt'
     /** After ui-chat's activity (0) and usage (1) pills; additive list order. */
@@ -637,15 +641,41 @@ window.__ModuleLoader__.load({
       }
 
       /**
-       * Call one channel endpoint and unwrap the Connection RPC envelope.
-       * Transport failures resolve to `null` (silent idle).
+       * POST one endpoint to the Host's exact Fetch route and unwrap the
+       * `{ok:true,value}` envelope. Every failure (missing fetch, non-OK HTTP,
+       * thrown/aborted request, malformed JSON, `{ok:false}`) resolves to
+       * `null`, so callers stay silent by construction.
+       * @param {string} endpoint - channel endpoint, e.g. `suggestions/wait`.
+       * @param {object} payload - endpoint payload.
+       * @param {AbortSignal|undefined} signal - request cancellation.
+       * @returns {Promise<unknown|null>} the envelope value, or null.
        */
       async function call(endpoint, payload, signal) {
+        if (typeof fetch !== 'function') return null
+        let response
         try {
-          return await ctx.connection.rpc.call(CHANNEL, endpoint, payload, signal)
+          const init = {
+            method: 'POST',
+            credentials: 'same-origin',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ endpoint: endpoint, payload: payload === undefined ? null : payload }),
+          }
+          if (signal !== undefined) init.signal = signal
+          // Relative URL on purpose: resolves under any mount prefix (ds-bot's `api/bot`).
+          response = await fetch('api/followup-prompt/rpc', init)
         } catch (error) {
           return null
         }
+        if (response === null || response === undefined || response.ok !== true) return null
+        let envelope
+        try {
+          envelope = await response.json()
+        } catch (error) {
+          return null
+        }
+        if (envelope === null || envelope === undefined || typeof envelope !== 'object') return null
+        if (envelope.ok !== true) return null
+        return envelope.value
       }
 
       /**
@@ -653,9 +683,7 @@ window.__ModuleLoader__.load({
        * @returns `{suggestion, turn, reason?}` or null for every failure.
        */
       async function waitForSuggestion(payload, signal) {
-        const result = await call('suggestions/wait', payload, signal)
-        if (result === null || result === undefined || result.ok !== true) return null
-        const value = result.value
+        const value = await call('suggestions/wait', payload, signal)
         if (value === null || value === undefined || typeof value !== 'object') return null
         const suggestion = typeof value.suggestion === 'string' ? value.suggestion.trim() : ''
         if (suggestion === '') return null
@@ -667,7 +695,7 @@ window.__ModuleLoader__.load({
         return resolved
       }
 
-      /** Fire-and-forget invalidation for the current turn. */
+      /** Fire-and-forget invalidation for the current turn (never throws). */
       function dismissSuggestion(payload) {
         return call('suggestions/dismiss', payload, undefined).catch(function ignoreDismissFailure() {
           /* fire-and-forget */
@@ -763,7 +791,7 @@ window.__ModuleLoader__.load({
     }
 
     return {
-      inject: ['slots', 'sessions', 'locale', 'connection'],
+      inject: ['slots', 'sessions', 'locale'],
       apply: apply,
     }
   },

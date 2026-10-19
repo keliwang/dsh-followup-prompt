@@ -4,8 +4,8 @@
  * After a turn completes, predict the next human message once through
  * `ctx.llm.stream()` (inherited request prefix, no agent loop, no tool
  * execution, no session writes), cache the result in memory keyed by
- * `sessionId`, and serve it to the browser half over DSH's authenticated
- * Connection RPC channel `/followup-prompt`.
+ * `sessionId`, and serve it to the browser half over an exact Fetch route on
+ * DSH's authenticated `/api` channel (`/api/followup-prompt/rpc`).
  *
  * Wiring summary (`dsh-followup-prompt-plan.md` §4.1):
  * - `session/event` + `turn/end(completed)` → invalidate the previous turn's
@@ -13,7 +13,14 @@
  * - `session/event` + `turn/start` → abort in-flight work and drop the cache;
  * - `session/disposed` → abort and delete all state for that session;
  * - plugin unload → abort the plugin lifetime, dispose the cache, and let
- *   `ctx.effect` remove the RPC channel.
+ *   `ctx.effect` unregister the `/api` route.
+ *
+ * The route registration uses `ctx.connection.fetch.register(...)`, the
+ * supported external-bundle transport (same mechanism as the installed
+ * `ds-bot` bundle and the shipped feature plugins): the Connection plugin owns
+ * the physical `/api` route, applies the Host/Origin fence and browser
+ * authentication, and buffers the JSON body. No `webServer` injection is
+ * needed on this plugin.
  *
  * @module dsh-followup-prompt/host/index
  */
@@ -21,17 +28,16 @@
 import { Config as FollowupPromptConfig, resolveConfig } from './config.js'
 import { PredictionCache, isSubagentSession, latestCompletedTurn } from './cache.js'
 import { generatePrediction } from './prediction.js'
-import { CHANNEL, createChannelHandler } from './channel.js'
+import { createFetchRoute } from './channel.js'
 
 /** Cordis plugin name (Loader row id is `followup-prompt`). */
 export const name = 'followup-prompt'
 
 /**
- * Required Host services. `webServer` is required because
- * `ctx.connection.rpc.handle()` registers its channel through
- * `owner.webServer.register` on the calling fiber.
+ * Required Host services. The `/api` Fetch route is hosted by the Connection
+ * plugin, so `webServer` is deliberately absent.
  */
-export const inject = ['connection', 'llm', 'sessions', 'webServer']
+export const inject = ['connection', 'llm', 'sessions']
 
 /** Loader/Settings schema (all fields volatile; see `host/config.js`). */
 export const Config = FollowupPromptConfig
@@ -52,7 +58,7 @@ export function apply(ctx, rawConfig) {
     generate: (session, turn, signal, config) => generatePrediction(ctx, session, turn, config, signal),
   })
 
-  /** Plugin-level lifetime: cancel every prediction and channel waiter on unload/HMR. */
+  /** Plugin-level lifetime: cancel every prediction and route waiter on unload/HMR. */
   ctx.effect(() => () => {
     lifetime.abort(new Error('followup-prompt: plugin disposed'))
     cache.dispose()
@@ -105,14 +111,10 @@ export function apply(ctx, rawConfig) {
     if (session?.id !== undefined) cache.invalidate(session.id)
   })
 
-  // The channel registration belongs to this plugin fiber: `rpc.handle`
-  // registers a prefix route through `owner.webServer.register`, and the
-  // returned disposer removes it on unload/HMR.
-  ctx.effect(() => {
-    const handler = createChannelHandler({ ctx, config: getConfig, cache })
-    const dispose = ctx.connection.rpc.handle(CHANNEL, handler)
-    return () => {
-      void dispose()
-    }
-  }, 'followup-prompt: rpc channel')
+  // The exact Fetch route belongs to this plugin fiber: `fetch.register`
+  // returns the disposer that removes it on unload/HMR.
+  ctx.effect(
+    () => ctx.connection.fetch.register(createFetchRoute({ ctx, config: getConfig, cache })),
+    'followup-prompt: /api fetch route',
+  )
 }

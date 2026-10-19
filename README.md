@@ -17,13 +17,16 @@
 | 包结构与清单（package.json / patch / locale / icon / files / exports） | ✅ 已完成 |
 | Host 半边（触发、继承式一次性调用、tool-rejection、缓存、RPC 通道、Config） | ✅ 骨架实现完成 |
 | Client 半边（`conversation.composer.dock` 建议条、Tab/点击接受、IME、i18n、静默失败） | ✅ 骨架实现完成 |
-| 离线验证（语法、清单、manifest、桩驱动冒烟、pack 文件清单） | ✅ `npm test`（32 项检查；Host 冒烟 33 条、Client 冒烟 36 条断言） |
-| 安装到真实 profile + 真机交互验证（§7.2 清单） | ⬜ 待做（需安装审批） |
+| 离线验证（语法、清单、manifest、桩驱动冒烟、pack 文件清单） | ✅ `npm test`（32 项检查；Host 冒烟 33 条、Client 冒烟 40 条断言） |
+| 安装到真实 profile（Desktop，2026-10-19） | ✅ `application: applied`，无 warnings；Host row `active` |
+| Host 真机生成（真实 LLM 建议 + dismiss） | ✅ 已通过（见下文「真机验收记录」） |
+| Client 真机注册（composer.dock occupant） | ✅ `followup-prompt` order 100 `active` |
+| 真机 UI 人工交互（Tab/IME/视觉版式/前缀缓存 A/B） | ⬜ 待人工验证（方案 §7.2 #3–#7、§7.5） |
 | 内联 ghost 样式（`conversation.input.overlay`，P2） | ⬜ 未实现，v1 固定用下方建议条 |
 | 自查设置页（`settings.section`，P2） | ⬜ 未实现，v1 用 Settings 自动表单 / patch |
 
-> 本仓库当前是「可安装、可离线验证」的 v0.1 骨架：离线检查证明装配与契约，**不证明**真机行为。
-> 真机验收按方案 §7.2 执行；未验证点见下文「验证状态」。
+> 本仓库当前是**已安装、Host/Client 已真机打通**的 v0.1 骨架：离线检查证明装配与契约，真机验收证明
+> 「安装 → Host 生成 → 鉴权路由 → 浏览器注册」主链路。Tab/IME/视觉与缓存 A/B 仍待人工确认。
 
 ---
 
@@ -90,8 +93,8 @@ Host `Config`（schemastery，全部字段 `.volatile()`）会在 **Settings →
 |---|---|---|
 | `enabled` | `true` | 总开关；关闭后不再产生任何模型请求。 |
 | `provider` / `model` | `''` / `''` | 空 = 沿用源会话当前路由；两者必须成对设置。 |
-| `reasoningEffort` | `''` | `'' \| off \| low \| high \| max`；非 DeepSeek provider 可能不支持 `off`，失败会静默。 |
-| `maxTokens` | `160` | 预测输出上限。 |
+| `reasoningEffort` | `'off'` | `'' \| off \| low \| high \| max`；默认关闭推理以压低延迟/成本（真机发现沿用源会话 `max` 会吃光输出预算）。非 DeepSeek provider 可能不支持 `off`，失败会静默；可改 `''` 跟随 provider 默认。 |
+| `maxTokens` | `400` | 预测输出上限（推理 token 也计入；默认值给推理型模型留余量）。 |
 | `timeoutMs` | `15000` | 总 deadline（2s–30s），覆盖所有 tool-rejection 轮次。 |
 | `maxTurns` | `0` | `0` = 不按轮裁剪（默认，保留父请求前缀缓存）；>0 仅降级模式。 |
 | `maxInputChars` | `20000` | 超预算时从最旧安全切点裁剪（牺牲缓存命中）。 |
@@ -125,14 +128,17 @@ Host（Node）                                    Client（Web）
 session/event → turn/end(completed)             conversation.composer.dock 建议条
   → 继承式一次性 ctx.llm.stream                  ← 长轮询 suggestions/wait ←
   → 归一化 + 内存缓存                              Tab/点击 → inputActions 写入草稿（不发送）
-  → connection.rpc.handle('/followup-prompt')      → suggestions/dismiss
+  → POST /api/followup-prompt/rpc                  → suggestions/dismiss
 ```
 
 - **不 fork、不进 agent loop**：上下文 = `session.deriveMessages()` 全量 + `requestHeader().tools` + `toolHistory()`
   + 尾部一条预测指令，与父会话下一次请求前缀一致以复用 provider 上下文缓存。
 - **tool 调用绝不执行**：保留 tools 定义；模型若发起 tool-call，统一回 `isError` tool-result 让它继续，
   最多 `maxToolRejectRounds` 轮后静默放弃。
-- 通道走 DSH 自带鉴权 RPC（Host/Origin 校验 + 浏览器 cookie），无需自建后端。
+- 传输走 DSH 自带的 `/api` exact Fetch 路由（Host/Origin 校验 + 浏览器 cookie 鉴权），无需自建后端。
+  注意：不能用 `ctx.connection.rpc.handle`——0.2.1 上该路径会以 Connection 服务自身的 ctx 去读
+  `webServer` 而激活失败（实测 `cannot get property "webServer" without inject`），Fetch 路由才是
+  in-repo 插件与 ds-bot 使用的受支持机制。
 - 详细协议见 [`docs/protocol.md`](docs/protocol.md)；设计与证据见方案 §3、§4、§5、§13。
 
 ## 开发
@@ -186,27 +192,46 @@ dsh-followup-prompt/
 - 所有运行时 JS `node --check`；`package.json` manifest / exports / `files` 完整性；
 - locale JSON、icon SVG、`cordis.patch.yml` 结构（19 个字段齐全、无 unknown key，且**逐项等于** `host/config.js` 的 `DEFAULTS`）；
 - `Config` schema 实测：19 个默认值、volatile live refs 解包、越界值拒绝、provider/model 必须成对；
-- Host 入口契约（name/inject 四项/Config/apply）与 Client 契约（classic script 无 import/export、ModuleLoader id、dock slot、RPC endpoint、`[data-composer-input]` 门、无 `submit()`）；
-- Host 桩驱动冒烟 **33 条**（通道注册一次、turn/end 触发一次调用、缓存命中不重复计费、dismiss→stale、坏请求/未知 endpoint 信封、tool-call 拒绝的配对合法性/轮次上限/重复 callId、采样、并发 busy、abort 语义、prefetch、TTL、子代理排除、裁剪/turn cap/stripMedia、卸载清理）；
-- Client 桩驱动冒烟 **36 条**（模块 id/inject/apply、locale+slot 注册、RPC 信封解包/静默失败、状态机渲染路径、Tab 接受 insertText/回退 setDraft、IME/草稿/running 隐藏、缓存复显、关闭/Esc、源码护栏）；
+- Host 入口契约（name/inject 三项: connection/llm/sessions + `/api` Fetch route/Config/apply）与 Client 契约（classic script 无 import/export、ModuleLoader id、dock slot、`api/followup-prompt/rpc` + `credentials: same-origin`、`[data-composer-input]` 门、无 `submit()`）；
+- Host 桩驱动冒烟 **33 条**（/api 路由注册一次且 shape 正确、turn/end 触发一次调用、缓存命中不重复计费、dismiss→stale、坏请求/未知 endpoint 信封、tool-call 拒绝的配对合法性/轮次上限/重复 callId、采样、并发 busy、abort 语义、prefetch、TTL、子代理排除、裁剪/turn cap/stripMedia、卸载清理）；
+- Client 桩驱动冒烟 **40 条**（模块 id/inject/apply、locale+slot 注册、fetch 请求 shape/AbortSignal/静默失败、状态机渲染路径、Tab 接受 insertText/回退 setDraft、IME/草稿/running 隐藏、缓存复显、关闭/Esc、源码护栏）；
 - `pnpm pack --dry-run` 打包文件清单（含 host/、client.js、patch、locale、icon、docs/protocol.md、README、LICENSE）。
 
-**尚未完成（需要安装到活体后验证）**：
+### 真机验收记录（2026-10-19，Desktop profile，dsh 0.2.1-rc.2）
 
-1. 真实 Harness 中 Host row 激活、Config schema 出现在 Settings；
-2. `turn/end` 后一次真实预测请求与建议条渲染；
-3. Tab 与 Lexical / slash 命令弹层的竞争、`[data-composer-input]` 命中（失败则退回「只点击接受」）；
-4. `inputActions.captureInsertion/insertText` 的真实行为与一次撤销；焦点归还；
-5. 建议条在深/浅色、附件栏、多行输入下的版式；
-6. provider 前缀缓存命中（方案 §7.5 的 A/B）；
-7. 非 DeepSeek provider 对合成 tool-call 历史的接受度（失败则降级为「tool-call 即放弃」）。
+**已通过**
+
+| # | 检查 | 结果 |
+|---|---|---|
+| 1 | `plugin_manager install_bundle`（`.tgz` 真实安装） | `application: applied`，`warnings: []` |
+| 2 | Host Loader row 激活 | `include:followup-prompt` → `fiberPhase: active`；`Config.listConfigs` 有 schema |
+| 3 | Client slot 注册 | `conversation.composer.dock` occupants: `followup-prompt` order 100 `active: true` |
+| 4 | 鉴权传输 | 用浏览器 cookie 调 `POST /api/followup-prompt/rpc`：坏请求→`followup-prompt/bad-request`、未知 endpoint→`followup-prompt/bad-endpoint`、未知会话→`unknown-session` |
+| 5 | **真实 LLM 预测** | 临时会话（已归档）第 2 回合：`{"suggestion":"先聊聊测试覆盖率和 CI 流程吧","turn":2}` |
+| 6 | dismiss 语义 | `suggestions/dismiss` 后再次 wait → `{suggestion:null,reason:"stale"}` |
+
+**真机验收中发现并已修复的两个问题**
+
+1. `ctx.connection.rpc.handle()` 在 0.2.1 上激活失败：`cannot get property "webServer" without inject`
+   （RPC 注册器用 Connection 服务自身的 ctx 读 `webServer`，调用方的 inject 不生效；in-repo 插件无一处使用该路径）。
+   → 改为 `ctx.connection.fetch.register` 的 `/api/followup-prompt/rpc` exact Fetch 路由（ds-bot 同款）。
+2. 预测请求继承了源会话 `reasoningEffort: max`，在 `maxTokens: 160` 下 finish=max-tokens、无文本建议。
+   → 默认改为 `reasoningEffort: 'off'` + `maxTokens: 400`（见配置表），真机重测即返回建议。
+
+**仍需人工在页面上确认**
+
+1. Tab 与 Lexical / slash 命令弹层的竞争、`[data-composer-input]` 命中（失败则退回「只点击接受」）；
+2. `inputActions.captureInsertion/insertText` 的真实行为与一次撤销；焦点归还；
+3. 建议条在深/浅色、附件栏、多行输入下的版式；
+4. provider 前缀缓存命中（方案 §7.5 的 A/B）；
+5. 非 DeepSeek provider 对合成 tool-call 历史的接受度（失败则降级为「tool-call 即放弃」）。
 
 ## 已知限制
 
 - v1 只有 composer 下方建议条，没有 Codex 风格的内联 ghost；ghost 见方案 §5.3 P2。
 - 预测请求会计费；无官方 moderation / 审计事件 / 正式遥测。
-- `connection.rpc` 传输契约尚未标记 stable；Client 侧的 slot props / `data-composer-input` 属于 0.2.1 实现细节，
-  升级后按方案 §7.4 回归；出问题可用 `enabled=false` 立即关闭。
+- `/api` exact Fetch 路由属于 DSH 内部契约（非 stable 公开 API）；Client 侧的 slot props / `data-composer-input`
+  属于 0.2.1 实现细节，升级后按方案 §7.4 回归；出问题可用 `enabled=false` 立即关闭。
 - 第三方 bundle 不能新增 session 事件类型，因此预测请求不可从会话日志审计/重放。
 
 ## 卸载 / 回滚
