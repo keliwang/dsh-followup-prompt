@@ -1,6 +1,6 @@
 {
   "meta": {
     "title": "Followup Prompt",
-    "description": "Predicts your next message after each reply and offers it below the composer as an editable draft. Press Tab to accept; it never sends by itself."
+    "description": "Predicts your next message after each reply and shows it inside the empty composer as an editable draft. Press Tab to accept; it never sends by itself."
   }
 }

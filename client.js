@@ -1,46 +1,12 @@
-/**
- * Followup Prompt — Client (browser) half of the `dsh-followup-prompt` bundle.
- *
- * Lazy-CJS plugin loaded through `window.__ModuleLoader__` (no bundler, no JSX):
- * the browser module table hands us React, and we contribute one inline ghost
- * inside the composer card through the `conversation.input.overlay` slot. The
- * ghost renders the next-user-message prediction the Host generated for the
- * latest completed turn where the empty draft's placeholder would be; Tab
- * accepts it into the composer as an editable draft. It never sends, and
- * every failure/state change degrades to "render nothing".
- *
- * Contract sources verified against DSH 0.2.1-rc.2:
- * - module registration: packages/client/modules/src/client/manifest.ts
- * - slots: packages/client/ui-slots/src/index.ts + ui-renderer/src/client/registry.ts
- *   (`conversation.input.overlay` is a floating session-scope list slot inside
- *   the composer card; third-party entries register via ctx.slots.inject/register)
- * - standard props: ui-conversation contract/slots.ts (SessionStandardProps),
- *   ui-session client/index.ts (sessionId/useSession), contract/input.ts
- *   (`InputActions.captureInsertion/insertText/setDraft`, `InputState`)
- * - transport: same-origin `POST api/followup-prompt/rpc` exactly like ds-bot's
- *   `POST api/bot` (installed ds-bot client.js + src/host/channel.js). The Host
- *   registers the exact Fetch route via `ctx.connection.fetch.register`
- *   (`path: '/api/followup-prompt/rpc'`) on the shared `/api` channel, so the
- *   browser cookie authenticates it; the body is `{endpoint, payload}` and the
- *   response is a JSON `{ok:true,value}` / `{ok:false,error}` envelope. The
- *   reference RPC-channel route (`ctx.connection.rpc.handle`) is not used:
- *   profile bundles cannot inject the `webServer` service it requires.
- * - locale: packages/client/locale/src/client/index.ts (`ctx.locale.register`)
- * - editor DOM gate: the composer editor host component sets `data-composer-input`;
- *   keymap.ts sets `data-composer-composing`. The inline ghost measures that
- *   element (rect + computed font/padding) so it sits exactly where typed text
- *   starts, and temporarily hides `[data-composer-placeholder]` while shown
- *   (restoring it on hide/unmount), following the plan's P2 calibration note.
- *
- * Never calls `inputActions` submission; only captureInsertion/insertText/setDraft.
- */
+// Browser half: a classic lazy-CJS script (no bundler, no JSX) that renders the prediction
+// as an inline ghost in `conversation.input.overlay`. It only writes drafts, never submits.
+// The `data-composer-*` attributes it relies on are DSH 0.2.1 implementation details.
 window.__ModuleLoader__.load({
   id: 'dsh-followup-prompt',
   factory(require) {
     const React = require('react')
     const h = React.createElement
 
-    /** Locale namespace / loader row identity / slot identity. */
     const NS = 'followup-prompt'
     const SLOT = 'conversation.input.overlay'
     const SLOT_ID = 'followup-prompt'
@@ -50,11 +16,9 @@ window.__ModuleLoader__.load({
     const REQUEST_TIMEOUT_MS = 20000
     /** Safari can emit the closing keydown after compositionend; keep the gate briefly. */
     const COMPOSITION_GRACE_MS = 10
-    /** The composer editor host's published DOM attributes (accept + alignment gates). */
     const COMPOSER_INPUT_SELECTOR = '[data-composer-input]'
     const COMPOSER_CARD_SELECTOR = '[data-composer-card]'
     const COMPOSER_PLACEHOLDER_SELECTOR = '[data-composer-placeholder]'
-    /** Ghost geometry before the first real measurement (card-relative px). */
     const DEFAULT_GHOST_LAYOUT = Object.freeze({
       ready: false,
       top: 12,
@@ -67,20 +31,15 @@ window.__ModuleLoader__.load({
       fontStyle: 'normal',
       letterSpacing: 'normal',
     })
-    /** Room reserved for the Tab hint + close button at the ghost line's right. */
     const GHOST_HINT_RESERVE_PX = 118
-    /** Layout effects must run before paint; fall back on React builds without one. */
     const useIsoLayoutEffect = typeof React.useLayoutEffect === 'function'
       ? React.useLayoutEffect
       : React.useEffect
 
-    // ── Dictionaries ────────────────────────────────────────────────────────
-    // Flat `{ key: text }` maps; the locale plugin resolves them per active
-    // locale with English fallback. `meta.*` mirrors locale/*.json so the
-    // runtime seat also carries display copy.
+    // `meta.*` mirrors locale/*.json.
     const EN = {
       'meta.title': 'Followup Prompt',
-      'meta.description': 'Predicts your next message after each reply and offers it below the composer as an editable draft. Press Tab to accept; it never sends by itself.',
+      'meta.description': 'Predicts your next message after each reply and shows it inside the empty composer as an editable draft. Press Tab to accept; it never sends by itself.',
       'prediction.prefix': 'Prediction',
       'prediction.statusAria': 'Predicted next message',
       'prediction.acceptAria': 'Insert the prediction into the composer draft',
@@ -89,7 +48,7 @@ window.__ModuleLoader__.load({
     }
     const ZH = {
       'meta.title': '后续提示',
-      'meta.description': '每轮回复结束后预测你的下一条消息，并在输入框下方提供可编辑草稿。按 Tab 接受，绝不自动发送。',
+      'meta.description': '每轮回复结束后预测你的下一条消息，并在空输入框内显示为可编辑草稿。按 Tab 接受，绝不自动发送。',
       'prediction.prefix': '预测',
       'prediction.statusAria': '预测的下一条消息',
       'prediction.acceptAria': '将预测内容填入输入框草稿',
@@ -97,14 +56,9 @@ window.__ModuleLoader__.load({
       'prediction.dismissAria': '关闭预测',
     }
 
-    // ── Presentation ────────────────────────────────────────────────────────
-    // Only tokens that exist in the shipped theme alias layer (verified against
-    // ui-theme's token catalog) plus layout-neutral fallbacks; light and dark
-    // both resolve through the theme, so no palette color is hard-coded.
+    // Theme alias tokens only, so light and dark both resolve through the theme.
     const styles = {
-      // Zero-height overlay host anchored at the composer card's top-left. The
-      // real position comes from `measureGhostLayout`; children are
-      // click-through except the tiny close button so typing/carets still work.
+      // Click-through except the close button, so typing and caret placement still work.
       root: {
         position: 'absolute',
         top: 0,
@@ -179,23 +133,19 @@ window.__ModuleLoader__.load({
       '}',
     ].join('\n')
 
-    // ── Small defensive helpers ─────────────────────────────────────────────
     /** Identity selector: the published snapshots are stable references. */
     function selectSnapshot(snapshot) {
       return snapshot
     }
 
-    /** Hook seat used when a composition omits a standard hook (never expected). */
     function useAbsentSnapshot() {
       return undefined
     }
 
-    /** Translate fallback: a missing locale seat must not break rendering. */
     function identityTranslate(key) {
       return key
     }
 
-    /** Keep the composer focused when a bar control is pressed. */
     function preventFocusLoss(event) {
       try {
         event.preventDefault()
@@ -204,7 +154,6 @@ window.__ModuleLoader__.load({
       }
     }
 
-    /** Whether the composer editor currently owns keyboard focus. */
     function composerHasFocus() {
       if (typeof document === 'undefined') return false
       const active = document.activeElement
@@ -216,7 +165,6 @@ window.__ModuleLoader__.load({
       }
     }
 
-    /** Whether the event target is (inside) the composer's editable host. */
     function isInsideComposer(target) {
       if (target === null || target === undefined || typeof target !== 'object') return false
       if (typeof Element !== 'undefined' && !(target instanceof Element)) return false
@@ -228,11 +176,7 @@ window.__ModuleLoader__.load({
       }
     }
 
-    /**
-     * Cheap open-popup probe: a visible slash/command menu owns the keyboard
-     * gesture, so the bar must let Tab/Escape through while one is open.
-     * Hidden-but-mounted menus (getClientRects() empty) do not count.
-     */
+    // A visible slash/command menu owns Tab/Escape; mounted-but-hidden menus do not count.
     function hasOpenPopup() {
       if (typeof document === 'undefined' || typeof document.querySelectorAll !== 'function') return false
       try {
@@ -251,7 +195,6 @@ window.__ModuleLoader__.load({
       }
     }
 
-    /** Whether a keyboard event is an IME composition event (legacy keyCode included). */
     function isComposingEvent(event) {
       if (event === null || event === undefined) return false
       if (event.isComposing === true) return true
@@ -259,17 +202,6 @@ window.__ModuleLoader__.load({
       return event.keyCode === 229 || event.which === 229
     }
 
-    // ── Template class (re-created per render; hook order is fixed) ─────────
-    /**
-     * Inline next-message ghost, mounted as one floating entry inside
-     * `conversation.input.overlay` for the current Session. It is positioned at
-     * the real editor origin and visually replaces the empty draft's
-     * placeholder, so it reads as typed-but-not-yet-committed text.
-     *
-     * Standard props consumed: sessionId, useSession, useInput, inputActions, t.
-     * Injected props consumed: waitForSuggestion, dismissSuggestion,
-     * focusComposer, activateBar (the apply-owned keyboard bridge).
-     */
     function FollowupSuggestionBar(props) {
       const {
         sessionId,
@@ -281,7 +213,6 @@ window.__ModuleLoader__.load({
         activateBar,
       } = props
 
-      // Hooks stay in fixed positions regardless of optional prop presence.
       const useSessionHook = typeof props.useSession === 'function' ? props.useSession : useAbsentSnapshot
       const useInputHook = typeof props.useInput === 'function' ? props.useInput : useAbsentSnapshot
       const session = useSessionHook(selectSnapshot)
@@ -290,27 +221,20 @@ window.__ModuleLoader__.load({
       const [suggestion, setSuggestion] = React.useState(null)
       const [turn, setTurn] = React.useState(null)
       const [composing, setComposing] = React.useState(false)
-      /** Measured editor geometry for the inline ghost (card-relative px). */
       const [ghostLayout, setGhostLayout] = React.useState(DEFAULT_GHOST_LAYOUT)
-      /** Ghost overlay host, used to find the composer card and return focus. */
       const ghostRootRef = React.useRef(null)
 
       /** Generation token: bumped on abort, so stale responses are dropped. */
       const generationRef = React.useRef(0)
-      /** In-flight request cancellation. */
       const abortRef = React.useRef(null)
       /** One request per idle epoch; reset when a new turn starts. */
       const requestedRef = React.useRef(false)
-      /** Last accepted {sessionId, turn, suggestion} answer (per session+turn). */
       const cacheRef = React.useRef(null)
       /** Explicit dismissal (close) suppresses a cached re-show. */
       const dismissedRef = React.useRef(false)
-      /** Latest eligibility, read when a response arrives. */
       const eligibleRef = React.useRef(false)
-      /** Session identity this component instance was last reconciled for. */
       const lastSessionIdRef = React.useRef(sessionId)
 
-      // ── Derived state ────────────────────────────────────────────────────
       const sessionKnown = session !== null && session !== undefined
       const inputKnown = input !== null && input !== undefined
       const running = sessionKnown && session.running === true
@@ -331,14 +255,6 @@ window.__ModuleLoader__.load({
       const visible = suggestion !== null && eligible && composing === false
       eligibleRef.current = eligible
 
-      /**
-       * Measure the composer card and its editor, then store card-relative
-       * geometry for the ghost: the editable element's real text origin,
-       * available width, and the editor's computed font. Defensive on every
-       * DOM capability so a test renderer or a future layout change degrades to
-       * the default geometry instead of throwing.
-       * @returns {void}
-       */
       function measureGhostLayout() {
         if (typeof document === 'undefined') return
         const root = ghostRootRef.current
@@ -411,7 +327,6 @@ window.__ModuleLoader__.load({
         })
       }
 
-      // ── Request machinery ───────────────────────────────────────────────
       function cancelInFlight() {
         generationRef.current += 1
         const controller = abortRef.current
@@ -481,12 +396,6 @@ window.__ModuleLoader__.load({
           })
       }
 
-      // ── Accept / dismiss ─────────────────────────────────────────────────
-      /**
-       * Write the suggestion into the composer as an editable draft.
-       * Uses the version-guarded insertion pair when available, and only
-       * falls back to a whole-draft replacement when they are absent.
-       */
       function writeDraft(text) {
         const actions = inputActions
         if (actions === null || actions === undefined) return false
@@ -553,7 +462,6 @@ window.__ModuleLoader__.load({
         return true
       }
 
-      // ── State machine (one request per idle epoch) ───────────────────────
       React.useEffect(function syncSuggestionState() {
         if (lastSessionIdRef.current !== sessionId) {
           lastSessionIdRef.current = sessionId
@@ -602,7 +510,6 @@ window.__ModuleLoader__.load({
         }
       }, [sessionId, running, eligible])
 
-      // ── IME composition tracking (document-level, composer-scoped) ───────
       React.useEffect(function trackComposition() {
         if (typeof document === 'undefined' || typeof document.addEventListener !== 'function') return undefined
         let graceTimer = null
@@ -646,7 +553,6 @@ window.__ModuleLoader__.load({
         }
       }, [])
 
-      // ── Keyboard bridge: hand the live bar to the apply-owned listener ───
       React.useEffect(function publishKeyboardBar() {
         if (typeof activateBar !== 'function') return undefined
         // Session-scoped overlays can stay mounted for more than one composer;
@@ -666,7 +572,6 @@ window.__ModuleLoader__.load({
         })
       })
 
-      // ── Inline ghost placement: measure before paint + follow resizes ────
       useIsoLayoutEffect(function placeInlineGhost() {
         if (!visible) return undefined
         measureGhostLayout()
@@ -751,7 +656,6 @@ window.__ModuleLoader__.load({
         }
       }, [visible, sessionId])
 
-      // ── Unmount: never leave a transport request alive ───────────────────
       React.useEffect(function stopOnUnmount() {
         return function cleanupRequests() {
           cancelInFlight()
@@ -819,14 +723,7 @@ window.__ModuleLoader__.load({
       )
     }
 
-    // ── Apply (plugin body) ────────────────────────────────────────────────
-    /**
-     * Install dictionaries, the compositor keyboard/IME guards, and the dock
-     * entry. All registrations ride the plugin fiber's effect lifetime.
-     * @param ctx - Client Cordis context.
-     */
     function apply(ctx) {
-      /** The mounted bar (at most one visible composer); set by the component. */
       const barBridge = { current: null }
 
       function activateBar(handle) {
@@ -836,16 +733,6 @@ window.__ModuleLoader__.load({
         }
       }
 
-      /**
-       * POST one endpoint to the Host's exact Fetch route and unwrap the
-       * `{ok:true,value}` envelope. Every failure (missing fetch, non-OK HTTP,
-       * thrown/aborted request, malformed JSON, `{ok:false}`) resolves to
-       * `null`, so callers stay silent by construction.
-       * @param {string} endpoint - channel endpoint, e.g. `suggestions/wait`.
-       * @param {object} payload - endpoint payload.
-       * @param {AbortSignal|undefined} signal - request cancellation.
-       * @returns {Promise<unknown|null>} the envelope value, or null.
-       */
       async function call(endpoint, payload, signal) {
         if (typeof fetch !== 'function') return null
         let response
@@ -874,10 +761,6 @@ window.__ModuleLoader__.load({
         return envelope.value
       }
 
-      /**
-       * Long-poll the Host for this turn's prediction.
-       * @returns `{suggestion, turn, reason?}` or null for every failure.
-       */
       async function waitForSuggestion(payload, signal) {
         const value = await call('suggestions/wait', payload, signal)
         if (value === null || value === undefined || typeof value !== 'object') return null
@@ -891,17 +774,12 @@ window.__ModuleLoader__.load({
         return resolved
       }
 
-      /** Fire-and-forget invalidation for the current turn (never throws). */
       function dismissSuggestion(payload) {
         return call('suggestions/dismiss', payload, undefined).catch(function ignoreDismissFailure() {
           /* fire-and-forget */
         })
       }
 
-      /**
-       * Best-effort keyboard return to the composer (used by click accept).
-       * Feature-detected: the conversation service is optional here.
-       */
       function focusComposer(sessionId) {
         try {
           const sessions = ctx.sessions !== undefined && ctx.sessions !== null

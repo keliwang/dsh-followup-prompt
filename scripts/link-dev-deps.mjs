@@ -1,20 +1,7 @@
 #!/usr/bin/env node
-/**
- * Link the DSH shared `@deepseek-ai/*` packages into `./node_modules` for local
- * development and the stub-driven verification scripts.
- *
- * Installed bundles resolve `@deepseek-ai/*` through the DSH profile closure
- * (typically `~/.dsh/profiles/node_modules/@deepseek-ai`). During development
- * there is no such ancestor next to this checkout, so this script creates one
- * symlink: `./node_modules/@deepseek-ai -> <detected shared packages>`.
- *
- * Usage:
- *   node scripts/link-dev-deps.mjs            # create, or report the existing link
- *   node scripts/link-dev-deps.mjs --force    # replace an existing link
- *
- * The link is dev-only: `node_modules/` is git-ignored and excluded from the
- * published package (`files` in package.json).
- */
+// Dev-only: symlink ./node_modules/@deepseek-ai to the DSH shared packages so the Host
+// modules resolve outside a profile. `--force` replaces an existing link.
+
 import { existsSync, lstatSync, mkdirSync, readlinkSync, rmSync, symlinkSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'

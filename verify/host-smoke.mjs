@@ -1,30 +1,7 @@
 #!/usr/bin/env node
-/**
- * Stub-driven smoke verification for the Followup Prompt Host half.
- *
- * This is an offline contract/assembly check, not a live-Harness behavior
- * check. It imports the real Host plugin modules, drives them with a stub
- * `ctx` (listeners, effects, a fake Connection Fetch-route registry, a fake
- * session store, and a fake `ctx.llm.stream`), and asserts the Host-side plan
- * (`dsh-followup-prompt-plan.md` §4, `docs/protocol.md`):
- *
- *  - entry contract: name / inject / Config / apply;
- *  - exactly one exact Fetch route registered under `/api/followup-prompt/rpc`;
- *  - `turn/end(completed)` with prefetch off makes zero model calls, and the
- *    following `suggestions/wait` makes exactly one;
- *  - a cached turn is served without another model call;
- *  - `suggestions/dismiss` makes the turn unservable (`stale`);
- *  - bad payloads and unknown endpoints return the protocol failure envelope;
- *  - unknown session / open turn / turn mismatch resolve without a model call;
- *  - a tool-calling model is rejected (never executed), retried at most
- *    `maxToolRejectRounds` times, and then abandons with `suggestion: null`;
- *  - concurrent waiters dedupe onto one generation, an aborted waiter cancels
- *    an unobserved generation, and `maxConcurrent` answers `busy`;
- *  - sampling, the disabled switch, TTL sweeps, and config clamping behave.
- *
- * Usage: node verify/host-smoke.mjs
- * Exit code 0 = every check passed; non-zero = failures listed in the summary.
- */
+// Stub-driven smoke test: drives the real Host modules with a fake ctx, session store,
+// Fetch-route registry and `ctx.llm.stream`.
+
 import { apply, Config, name, inject } from '../host/index.js'
 import {
   CONFIG_KEYS,
@@ -61,12 +38,6 @@ const DEFAULT_SUGGESTION = 'Add a unit test for the guard'
 
 const results = []
 
-/**
- * Register and run one async check.
- * @param {string} label - check name.
- * @param {() => Promise<void> | void} body - assertions.
- * @returns {Promise<void>} resolves after recording pass/fail.
- */
 async function check(label, body) {
   try {
     await body()
@@ -76,65 +47,28 @@ async function check(label, body) {
   }
 }
 
-/**
- * Assert a condition.
- * @param {unknown} condition - value expected to be truthy.
- * @param {string} message - failure message.
- * @returns {void}
- */
 function assert(condition, message) {
   if (!condition) throw new Error(message)
 }
 
-/**
- * Assert strict equality.
- * @param {unknown} actual - observed value.
- * @param {unknown} expected - expected value.
- * @param {string} message - failure message.
- * @returns {void}
- */
 function assertEqual(actual, expected, message) {
   if (actual !== expected) {
     throw new Error(`${message}: expected ${JSON.stringify(expected)}, observed ${JSON.stringify(actual)}`)
   }
 }
 
-/**
- * Assert deep JSON equality.
- * @param {unknown} actual - observed value.
- * @param {unknown} expected - expected value.
- * @param {string} message - failure message.
- * @returns {void}
- */
 function assertDeepEqual(actual, expected, message) {
   const left = JSON.stringify(actual)
   const right = JSON.stringify(expected)
   if (left !== right) throw new Error(`${message}: expected ${right}, observed ${left}`)
 }
 
-/** Let pending microtasks and immediate callbacks settle. */
 const flush = () => new Promise((resolve) => setImmediate(resolve))
 
-/**
- * Wait a short real while (only for cancellation propagation checks).
- * @param {number} ms - delay.
- * @returns {Promise<void>} resolves after the delay.
- */
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
 
 // ── Stub Harness ────────────────────────────────────────────────────────────
 
-/**
- * Create a fake live session for the Host plugin.
- * @param {string} id - session id.
- * @param {object} [options] - session stubs.
- * @param {object[]} [options.messages] - derived history.
- * @param {object} [options.header] - session header overrides (origin/delegationDepth).
- * @param {object} [options.requestConfig] - request-header config.
- * @param {object} [options.adapterDefaults] - request-header adapter defaults.
- * @param {object[]} [options.tools] - request-header tool schemas.
- * @returns {{ session: object, events: object[] }} the session and its mutable log.
- */
 function createSession(id, options = {}) {
   const events = []
   const messages = options.messages ?? [
@@ -164,33 +98,17 @@ function createSession(id, options = {}) {
   return { session, events }
 }
 
-/**
- * Append one committed session event to a fake log.
- * @param {object} harness - harness instance.
- * @param {object} session - fake session.
- * @param {object[]} events - mutable event array.
- * @param {{ type: string, data: object }} event - event to append (without seq/time).
- * @returns {void}
- */
 function appendEvent(harness, session, events, event) {
   const stored = { ...event, seq: events.length, time: Date.now() }
   events.push(stored)
   harness.emit(session, stored)
 }
 
-/** Seed a completed turn into the fake log (turn/start + turn/end completed). */
 function seedCompletedTurn(harness, session, events, turn) {
   appendEvent(harness, session, events, { type: 'turn/start', data: { turn } })
   appendEvent(harness, session, events, { type: 'turn/end', data: { turn, reason: { kind: 'completed' } } })
 }
 
-/**
- * Build a model-visible history with two human turns, an assistant
- * tool-call/tool-result pair between them, and an oversized first turn so the
- * degraded (trimmed) request path can be exercised deterministically.
- * @param {{ image?: boolean }} [options] - put an image block on the latest human turn.
- * @returns {object[]} derived messages.
- */
 function contextMessages(options = {}) {
   const filler = 'x'.repeat(2000)
   return [
@@ -216,7 +134,6 @@ function contextMessages(options = {}) {
   ]
 }
 
-/** A plain text completion stream. */
 async function* textChunks(text) {
   yield { type: 'block-start', index: 0, blockType: 'text' }
   yield { type: 'text-delta', index: 0, text }
@@ -224,7 +141,6 @@ async function* textChunks(text) {
   yield { type: 'finish', reason: { kind: 'stop' } }
 }
 
-/** A tool-calling completion stream (finished with `tool-calls`). */
 async function* toolCallChunks(calls) {
   for (let index = 0; index < calls.length; index += 1) {
     const call = calls[index]
@@ -235,15 +151,6 @@ async function* toolCallChunks(calls) {
   yield { type: 'finish', reason: { kind: 'tool-calls' } }
 }
 
-/**
- * Create the stub Host context, apply the real plugin, and capture everything
- * the assertions need.
- *
- * @param {object} options - harness options.
- * @param {object} [options.config] - raw plugin config (plain values are accepted).
- * @param {(options: object, callIndex: number) => AsyncIterable<object>} [options.streams] - fake model streams.
- * @returns {object} the harness: ctx, sessions, calls, routes, emit, disposeAll.
- */
 function createHarness(options = {}) {
   const listeners = new Map()
   const effects = []
@@ -301,26 +208,21 @@ function createHarness(options = {}) {
     calls,
     routes,
     effects,
-    /** Register a fake live session. */
     addSession(session) {
       sessions.set(session.id, session)
       return session
     },
-    /** Dispatch one `session/event` observation to the plugin listener. */
     emit(session, event) {
       for (const listener of listeners.get('session/event') ?? []) listener(session, event)
     },
-    /** Dispatch one `session/disposed` observation. */
     emitDisposed(session) {
       for (const listener of listeners.get('session/disposed') ?? []) listener(session)
     },
-    /** The registered exact Fetch route under ROUTE. */
     get route() {
       const route = routes.get(ROUTE)
       if (route === undefined) throw new Error(`fetch route ${ROUTE} is not registered`)
       return route
     },
-    /** Dispose every plugin effect in reverse order (fiber unload). */
     async disposeAll() {
       for (const effect of [...effects].reverse()) {
         if (typeof effect.cleanup === 'function') await effect.cleanup()
@@ -331,14 +233,12 @@ function createHarness(options = {}) {
   return harness
 }
 
-/** Unwrap a successful protocol envelope. */
 function valueOf(result) {
   assert(result !== null && typeof result === 'object', 'route returned no envelope')
   assert(result.ok === true, `expected ok:true envelope, observed ${JSON.stringify(result)}`)
   return result.value
 }
 
-/** Assert a protocol failure envelope. */
 function assertFailure(result, code, label) {
   assert(result !== null && typeof result === 'object', `${label}: no envelope`)
   assertEqual(result.ok, false, `${label}: ok flag`)
@@ -347,13 +247,6 @@ function assertFailure(result, code, label) {
   assert(result.error?.details !== null && typeof result.error?.details === 'object', `${label}: error details`)
 }
 
-/**
- * One HTTP-shaped exchange with the captured Fetch route.
- * @param {object} harness - harness instance.
- * @param {unknown} body - JSON-serializable body, or a raw string body.
- * @param {{ method?: string, signal?: AbortSignal }} [options] - method/signal.
- * @returns {Promise<object>} decoded JSON envelope.
- */
 async function post(harness, body, options = {}) {
   const init = {
     method: options.method ?? 'POST',
@@ -371,36 +264,22 @@ async function post(harness, body, options = {}) {
   return response.json()
 }
 
-/**
- * Call one endpoint through the exact Fetch route.
- * @param {object} harness - harness instance.
- * @param {string} endpoint - wire endpoint name.
- * @param {unknown} payload - endpoint payload (omitted when undefined).
- * @param {AbortSignal} [signal] - client-disconnect cancellation.
- * @returns {Promise<object>} decoded JSON envelope.
- */
 function callEndpoint(harness, endpoint, payload, signal) {
   const body = { endpoint }
   if (payload !== undefined) body.payload = payload
   return post(harness, body, signal === undefined ? {} : { signal })
 }
 
-/** Call the wait endpoint through the exact Fetch route. */
 function wait(harness, payload, signal) {
   return callEndpoint(harness, 'suggestions/wait', payload, signal)
 }
 
-/** Call the dismiss endpoint through the exact Fetch route. */
 function dismiss(harness, payload) {
   return callEndpoint(harness, 'suggestions/dismiss', payload)
 }
 
 // ── Checks ──────────────────────────────────────────────────────────────────
 
-/**
- * Run every smoke check.
- * @returns {Promise<void>} resolves after all checks ran.
- */
 async function main() {
   // ── Entry contract ───────────────────────────────────────────────────────
   await check('entry contract: name / inject / Config / apply', () => {

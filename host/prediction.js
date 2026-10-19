@@ -1,33 +1,10 @@
-/**
- * Followup Prompt predictor: context assembly, the one-shot inherited model
- * call, the tool-rejection loop, and output normalization.
- *
- * The prediction request is a pure function of the session log: it reuses the
- * same derived history, request header, tool declarations, and tool history as
- * the session's next real request (maximizing provider prefix reuse), appends
- * one prediction instruction as the tail user message, and dispatches through
- * `ctx.llm.stream()` without entering the agent loop. Tools are declared but
- * never executed: a model tool call is rejected with one unified `isError`
- * tool result per call and the model is asked again, bounded by
- * `maxToolRejectRounds` and one shared deadline.
- *
- * Security/privacy notes: the transcript is never logged, the transcript is
- * never persisted, and only non-sensitive request metadata (session id, turn,
- * provider/model, latency, token counts, rounds, outcome) reaches `ctx.logger`.
- *
- * @module dsh-followup-prompt/host/prediction
- */
+// One-shot prediction that inherits the session's next request prefix (history, tools,
+// toolHistory) without entering the agent loop. Tools are declared, never executed.
 
 import { BlockAssembler, createAssistantMessage, createToolResultMessage } from '@deepseek-ai/dsh-llm'
 
-/** Instruction prompt version, for README/A-B metadata (`promptVersion`). */
 export const PROMPT_VERSION = 1
 
-/**
- * Built-in prediction instruction. Reuses the derived-prompt prefix instead of
- * re-framing the transcript, which keeps the provider context-cache prefix
- * stable; the output is plain text with a `NO_PREDICTION` sentinel.
- */
 export const FOLLOWUP_INSTRUCTION = [
   'You predict the next message the human user will type in this coding conversation.',
   "Read the conversation above, including the assistant's most recent answer.",
@@ -37,22 +14,14 @@ export const FOLLOWUP_INSTRUCTION = [
   'If a confident prediction is impossible, reply with exactly: NO_PREDICTION',
 ].join('\n')
 
-/**
- * Unified tool-rejection text. Every rejected call in every round receives this
- * exact error result, so the synthetic history stays pairing-valid and the
- * model is told plainly that no tool exists in this context.
- */
 export const TOOL_REJECTION_TEXT = [
   'Tool calls are disabled in this context. No tool was executed and no tool can be executed.',
   'Do not call any tool. Reply with ONLY the predicted next user message as plain text.',
 ].join(' ')
 
-/** Rough per-message structural overhead used by the character budget estimate. */
 const MESSAGE_OVERHEAD_CHARS = 12
-/** Rough character cost of an image/file placeholder used by the budget estimate. */
 const MEDIA_PLACEHOLDER_CHARS = 200
 
-/** Terminal outcomes without a suggestion. */
 export const PREDICTION_REASONS = Object.freeze({
   noRoute: 'no-route',
   error: 'error',
@@ -62,26 +31,10 @@ export const PREDICTION_REASONS = Object.freeze({
   maxTokens: 'max-tokens',
 })
 
-/**
- * Reject terminal-vs-transcript output that must never be shown.
- * @param {unknown} value - candidate number.
- * @param {number} fallback - value used when not finite.
- * @returns {number} the finite number.
- */
 function finite(value, fallback) {
   return typeof value === 'number' && Number.isFinite(value) ? value : fallback
 }
 
-/**
- * Estimate one message's contribution to the character budget.
- *
- * Text and reasoning blocks count their characters; tool calls count their
- * name and raw arguments; media blocks count a fixed placeholder (the full
- * prefix path does not strip them, but the estimate stays conservative).
- *
- * @param {object} message - one model-visible message.
- * @returns {number} estimated characters.
- */
 export function estimateMessageChars(message) {
   let total = MESSAGE_OVERHEAD_CHARS
   const content = Array.isArray(message?.content) ? message.content : []
@@ -107,34 +60,16 @@ export function estimateMessageChars(message) {
   return total
 }
 
-/**
- * Whether a message is a leading head message (system prompt or developer
- * context) that trimming must always preserve.
- * @param {object} message - one message.
- * @returns {boolean} true for system/developer roles.
- */
 function isHeadMessage(message) {
   return message?.role === 'system' || message?.role === 'developer'
 }
 
-/**
- * Whether a message is a human-typed user message — the only safe trim
- * boundary. Synthetic injected user context (file notices, skills, goals) has
- * another producer `source.kind` and must not be used as a cut point.
- * @param {object} message - one message.
- * @returns {boolean} true for a human user message.
- */
+// Injected user context (file notices, skills, goals) has another `source.kind` and is
+// not a safe trim boundary.
 export function isHumanUserMessage(message) {
   return message?.role === 'user' && message?.source?.kind === 'user'
 }
 
-/**
- * Replace image/file blocks with text placeholders, leaving every other block
- * untouched. Only used in the degraded (trimmed) path; the full-prefix path
- * keeps media byte-identical to the parent request.
- * @param {object} message - one message.
- * @returns {object} the message with media projected to text placeholders.
- */
 function stripMediaFromMessage(message) {
   const content = Array.isArray(message?.content) ? message.content : []
   const projected = content.map((block) => {
@@ -148,22 +83,6 @@ function stripMediaFromMessage(message) {
   return { ...message, content: projected }
 }
 
-/**
- * Trim a derived history to the configured budget and/or turn cap.
- *
- * Default behavior keeps the full history so the request prefix matches the
- * parent conversation (the reason not to trim). Trimming is the degraded path:
- * it keeps the leading system/developer head and a suffix starting at a human
- * user message, never inside an assistant-tool-call/tool-result pair. A cut is
- * only ever made at a human user message boundary; when no candidate fits, the
- * prediction is abandoned rather than sending an orphaned tool call.
- *
- * @param {readonly object[]} messages - full `session.deriveMessages()` output.
- * @param {object} config - resolved config.
- * @param {number} [instructionChars] - budget reserved for the tail instruction.
- * @returns {{ messages: readonly object[], trimmed: boolean } | null} the kept
- *   history, or null when the history cannot fit the budget at all.
- */
 export function trimRequestMessages(messages, config, instructionChars = 0) {
   if (!Array.isArray(messages) || messages.length === 0) return null
   const maxInputChars = finite(config?.maxInputChars, 0)
@@ -186,7 +105,6 @@ export function trimRequestMessages(messages, config, instructionChars = 0) {
   const bodyChars = body.reduce((sum, message) => sum + estimateMessageChars(message), 0)
   const needsBudget = budgetActive && headChars + bodyChars + instructionChars > maxInputChars
   const needsTurns = turnsActive && humanIndices.length > maxTurns
-  // Default behavior: full history, byte-identical prefix. Nothing to cut.
   if (!needsBudget && !needsTurns) return { messages, trimmed: false }
   if (humanIndices.length === 0) {
     // No human boundary means no safe cut point: abandon instead of sending an
@@ -194,7 +112,6 @@ export function trimRequestMessages(messages, config, instructionChars = 0) {
     return needsBudget ? null : { messages, trimmed: false }
   }
 
-  // Turn cap: keep the most recent `maxTurns` human turns.
   let start = needsTurns ? humanIndices[humanIndices.length - maxTurns] : 0
 
   if (needsBudget) {
@@ -216,27 +133,15 @@ export function trimRequestMessages(messages, config, instructionChars = 0) {
 
   if (start === 0) return { messages, trimmed: false }
   const kept = [...head, ...body.slice(start)]
-  // Defensive invariant: a cut is only ever made before a human user message.
   if (!isHumanUserMessage(kept[head.length])) return null
   return { messages: kept, trimmed: true }
 }
 
-/**
- * The prediction instruction for this configuration.
- * @param {object} config - resolved config.
- * @returns {string} the instruction text.
- */
 export function instructionText(config) {
   const prompt = typeof config?.prompt === 'string' ? config.prompt.trim() : ''
   return prompt.length > 0 ? prompt : FOLLOWUP_INSTRUCTION
 }
 
-/**
- * Assemble request messages plus the degraded-path flag in one pass.
- * @param {object} session - live Session.
- * @param {object} config - resolved config.
- * @returns {{ messages: object[], degraded: boolean } | null} the bundle.
- */
 function buildRequestBundle(session, config) {
   const all = session?.deriveMessages?.()
   if (!Array.isArray(all) || all.length === 0) return null
@@ -253,29 +158,10 @@ function buildRequestBundle(session, config) {
   }
 }
 
-/**
- * Build the request messages for a prediction.
- * @param {object} session - live Session.
- * @param {object} config - resolved config.
- * @returns {object[] | null} messages, or null when no prediction is possible.
- */
 export function buildRequestMessages(session, config) {
   return buildRequestBundle(session, config)?.messages ?? null
 }
 
-/**
- * Build the inherited one-shot request from the session's latest request
- * header: reuse provider/model/controls/tools/toolHistory for prefix reuse,
- * delete adapter-materialized defaults, and override the route only when the
- * configured `provider`+`model` pair is complete.
- *
- * @param {object} session - live Session.
- * @param {object} config - resolved config.
- * @param {AbortSignal | undefined} signal - caller cancellation.
- * @returns {{ options: object, messages: object[], provider: string, model: string,
- *   degraded: boolean } | null} the request seed, or null when the session has
- *   no route/history to inherit.
- */
 export function buildInheritedRequest(session, config, signal) {
   const header = session?.requestHeader?.()
   if (header === null || typeof header !== 'object') return null
@@ -317,17 +203,6 @@ export function buildInheritedRequest(session, config, signal) {
   return { options, messages: bundle.messages, provider, model, degraded: bundle.degraded }
 }
 
-/**
- * Normalize and safety-filter raw model text into a suggestion.
- *
- * Removes a wrapping markdown fence and outer quotes/backticks, drops the
- * `NO_PREDICTION` sentinel, rejects control characters and secret-looking
- * tokens, and truncates to `maxSuggestionChars`.
- *
- * @param {unknown} raw - raw model text.
- * @param {object} config - resolved config.
- * @returns {string | null} the suggestion, or null when it must be dropped.
- */
 export function normalizeSuggestion(raw, config) {
   let text = String(raw ?? '').trim()
   text = text.replace(/^```[a-zA-Z]*\n?|```$/g, '').trim()
@@ -337,11 +212,9 @@ export function normalizeSuggestion(raw, config) {
     if ((first === '"' && last === '"') || (first === '`' && last === '`')) text = text.slice(1, -1).trim()
   }
   if (text === '' || text.includes('NO_PREDICTION')) return null
-  // C0 control characters except tab/LF/CR; terminal escapes never reach the UI.
+  // C0 control characters except tab/LF/CR.
   if (/[\u0000-\u0008\u000B\u000C\u000E-\u001F]/.test(text)) return null
-  // Obvious secret shapes: the suggestion is never auto-sent, but it is shown.
-  // Covers common provider/CI prefixes; conservative by design (false positives
-  // only hide a prediction).
+  // Secret-looking tokens. Conservative: a false positive only hides a prediction.
   if (/(sk-(?:proj-|ant-)?[A-Za-z0-9_-]{16,}|gh[posru]_[A-Za-z0-9]{20,}|AKIA[0-9A-Z]{16}|xox[baprs]-[A-Za-z0-9-]{10,}|AIza[0-9A-Za-z_-]{30,})/.test(text)) {
     return null
   }
@@ -349,12 +222,6 @@ export function normalizeSuggestion(raw, config) {
   return text.length > max ? text.slice(0, max) : text
 }
 
-/**
- * A completion deadline shared by every tool-rejection round.
- * @param {AbortSignal | undefined} parent - caller cancellation.
- * @param {number} timeoutMs - whole-prediction deadline.
- * @returns {{ signal: AbortSignal, timedOut: () => boolean, dispose: () => void }} the deadline handle.
- */
 function createDeadline(parent, timeoutMs) {
   const controller = new AbortController()
   let timer
@@ -380,23 +247,8 @@ function createDeadline(parent, timeoutMs) {
   }
 }
 
-/**
- * Reject one round's tool calls with synthetic pairing-valid history.
- *
- * The synthetic assistant message carries only the tool-call blocks (no
- * reasoning, which may need provider signatures), and each call gets exactly
- * one `isError` tool result containing the unified rejection text. A duplicate
- * or empty call id is unrepresentable in provider history, so it abandons the
- * attempt instead.
- *
- * @param {object} input - builder inputs.
- * @param {readonly object[]} input.messages - history so far.
- * @param {readonly object[]} input.calls - assembled tool-call blocks.
- * @param {string} input.provider - request provider.
- * @param {string} input.model - request model.
- * @param {string} input.rejectionText - unified rejection text.
- * @returns {object[] | null} the extended messages, or null on invalid call ids.
- */
+// The synthetic assistant message carries only tool-call blocks: reasoning may need
+// provider signatures a synthetic message cannot provide.
 function appendToolRejections({ messages, calls, provider, model, rejectionText, usedCallIds }) {
   const ids = new Set()
   for (const call of calls) {
@@ -418,17 +270,6 @@ function appendToolRejections({ messages, calls, provider, model, rejectionText,
   ]
 }
 
-/**
- * Log non-sensitive attempt metadata. Never logs transcript text.
- * @param {object} ctx - plugin context.
- * @param {object} session - live Session.
- * @param {number} turn - completed turn.
- * @param {object} config - resolved config.
- * @param {number} startedAt - attempt start timestamp.
- * @param {object} result - attempt result.
- * @param {string} outcome - short outcome label.
- * @returns {void}
- */
 function logPrediction(ctx, session, turn, config, startedAt, result, outcome) {
   const usage = result.usage
   const suggestion = result.suggestion
@@ -451,23 +292,6 @@ function logPrediction(ctx, session, turn, config, startedAt, result, outcome) {
   ctx.logger?.debug?.('followup-prompt: prediction %o', meta)
 }
 
-/**
- * Generate one prediction for a completed turn.
- *
- * Never throws: model, provider, stream, and assembly failures are mapped to a
- * silent `suggestion: null` outcome with a reason. The only model side effect
- * is a normal, billable completion call made through `ctx.llm.stream()`; the
- * agent loop is never entered, no tool executes, and nothing is persisted.
- *
- * @param {object} ctx - plugin context (`llm`, `logger`).
- * @param {object} session - live Session.
- * @param {number} turn - the completed turn being predicted for (metadata only).
- * @param {object} config - resolved config.
- * @param {AbortSignal | undefined} signal - caller cancellation.
- * @returns {Promise<{ suggestion: string | null, reason?: string, rounds: number,
- *   toolRejected: boolean, degraded: boolean, provider?: string, model?: string,
- *   usage?: object }>} the attempt result.
- */
 export async function generatePrediction(ctx, session, turn, config, signal) {
   const startedAt = Date.now()
   const base = { rounds: 0, toolRejected: false, degraded: false, provider: undefined, model: undefined }
@@ -489,12 +313,10 @@ export async function generatePrediction(ctx, session, turn, config, signal) {
     ? config.toolRejectionText
     : TOOL_REJECTION_TEXT
   const maxRejectRounds = Math.max(0, finite(config?.maxToolRejectRounds, 1))
-  /** Every call id rejected in any prior round; reuse would duplicate a pairing. */
   const usedCallIds = new Set()
   let messages = built.messages
   let usage
 
-  /** Abandon the attempt with one non-sensitive debug record. */
   const finish = (reason, outcome) => {
     const result = { suggestion: null, reason, ...base, usage }
     logPrediction(ctx, session, turn, config, startedAt, result, outcome ?? reason)
@@ -551,7 +373,6 @@ export async function generatePrediction(ctx, session, turn, config, signal) {
         return result
       }
 
-      // A model tool call is expected occasionally; never execute it.
       base.toolRejected = true
       if (round >= maxRejectRounds) return finish(PREDICTION_REASONS.toolRejected)
       const extended = appendToolRejections({
@@ -563,7 +384,6 @@ export async function generatePrediction(ctx, session, turn, config, signal) {
         usedCallIds,
       })
       if (extended === null) {
-        // Duplicate/empty call ids cannot form a valid provider history.
         ctx.logger?.debug?.('followup-prompt: duplicate tool-call id; abandoning prediction')
         return finish(PREDICTION_REASONS.toolRejected, 'duplicate-call-id')
       }

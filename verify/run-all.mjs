@@ -1,22 +1,7 @@
 #!/usr/bin/env node
-/**
- * Offline verification for the dsh-followup-prompt bundle.
- *
- * Runs, in order:
- *   1. `node --check` on every runtime JavaScript file;
- *   2. package manifest / exports / `files` integrity;
- *   3. locale JSON, icon, and bundle patch sanity;
- *   4. Host and Client stub-driven smoke scripts;
- *   5. `pnpm pack --dry-run` packed-file inspection (skipped for `--checks`).
- *
- * Usage:
- *   node verify/run-all.mjs            # full offline verification
- *   node verify/run-all.mjs --checks   # static checks only
- *   node verify/run-all.mjs --no-pack  # everything except tarball inspection
- *
- * Exits non-zero when a required check fails. This is an offline contract and
- * assembly check — it does not prove live behavior inside the Harness.
- */
+// Offline verification: static checks, Host/Client stub smoke tests, and the packed file list.
+// `--checks` runs the static checks only. Not a live-Harness test.
+
 import { spawnSync } from 'node:child_process'
 import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
@@ -94,13 +79,6 @@ function nodeCheck(path) {
   }
 }
 
-/**
- * Parse one scalar value from the flat `config:` block of cordis.patch.yml.
- * Only the YAML subset this patch uses is supported (quoted strings, booleans,
- * integers/floats); anything else is returned as its trimmed text.
- * @param {string} text - raw scalar text after `key:`.
- * @returns {string | number | boolean | undefined} the parsed value.
- */
 function parsePatchScalar(text) {
   const value = text.trim()
   if (value === '') return undefined
@@ -228,9 +206,7 @@ try {
   if (!/^\s*-\s*insert:\s*$/m.test(patch)) throw new Error('patch has no insert block')
   if (!/^\s*-\s*id:\s*followup-prompt\s*$/m.test(patch)) throw new Error('patch row id is not followup-prompt')
   if (!/^\s*name:\s*dsh-followup-prompt\s*$/m.test(patch)) throw new Error('patch row name is not dsh-followup-prompt')
-  // `config:` is a mapping key under the inserted list item; its indent is
-  // 4/6/8 spaces depending on the patch style (plan §6.2 uses 4). Read the
-  // direct children of that block instead of hard-coding an indent.
+  // Read the direct children of `config:` instead of hard-coding its indent.
   const configMatch = patch.match(/^([ ]*)config:\s*$/m)
   if (configMatch === null) throw new Error('patch row has no config block')
   const configIndent = configMatch[1].length
@@ -403,7 +379,7 @@ if (noPack) {
 console.log('\n──────────────────────────────────────────────')
 if (failures.length === 0) {
   console.log(`Offline verification PASSED: ${passed} checks, ${skipped} skipped.`)
-  console.log('Live Harness behavior is NOT covered — see dsh-followup-prompt-plan.md §7.2.')
+  console.log('Live Harness behavior is NOT covered — see docs/design.md §7.3.')
   process.exit(0)
 }
 console.log(`Offline verification FAILED: ${failures.length} failure(s), ${passed} passed, ${skipped} skipped.`)

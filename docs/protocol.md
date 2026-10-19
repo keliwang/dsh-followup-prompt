@@ -1,7 +1,7 @@
 # Followup Prompt — wire protocol (Host ↔ Client)
 
-Status: **v1 draft, aligned with `dsh-followup-prompt-plan.md` §3.1 / §4.7 / §5.2.** The Host half and the
-browser half must be changed together; this document is the shared contract.
+The shared contract between the Host half (`host/channel.js`, `host/cache.js`) and the browser half
+(`client.js`). Change both halves together. Design rationale: [`design.md`](design.md).
 
 ## Transport
 

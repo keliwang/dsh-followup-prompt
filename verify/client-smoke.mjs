@@ -1,28 +1,6 @@
 #!/usr/bin/env node
-/**
- * Offline stub-driven smoke test for the Followup Prompt Client half.
- *
- * The browser artifact is a side-effect classic script: it registers a lazy
- * factory into `window.__ModuleLoader__`. This test provides that global, then
- * imports `../client.js` (the package is `"type": "module"`, so the import
- * executes the file as an ESM module whose only top-level effect is the
- * registration), materializes the factory against a minimal React shim, and
- * drives the plugin through a fake Client Context:
- *
- *   - module id / inject array / apply face;
- *   - locale dictionary registration (en + zh, meta.title present);
- *   - `conversation.input.overlay` registration options and component;
- *   - the injected transport face (same-origin fetch to the exact Fetch route,
- *     envelope unwrap, silent failures, dismiss);
- *   - a tiny hook runtime that actually renders the component: idle edge →
- *     `suggestions/wait` → bar mounted; Tab accept through the apply-owned
- *     capture listener writes the draft (never submits) and dismisses; draft /
- *     running / blank / IME states render nothing; cached re-show avoids a
- *     second request.
- *
- * This is an assembly/contract check, not live Harness behavior (see plan §7).
- * No network, no installed profile, no writes outside this script.
- */
+// Stub-driven smoke test: loads client.js against a fake module loader, slots, fetch and DOM.
+
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
@@ -63,7 +41,6 @@ const delay = ms => new Promise(resolve => setTimeout(resolve, ms))
 
 // ── Minimal DOM shim (document listeners + the composer-input attribute gate) ──
 function createDomShim() {
-  /** @type {Map<string, Array<{fn: Function, capture: boolean}>>} */
   const listeners = new Map()
   class FakeElement {
     constructor(insideComposer) {
@@ -249,7 +226,6 @@ function createReactRuntime() {
   return { runtime, createInstance }
 }
 
-/** Render + flush effects/promises until the hook runtime settles. */
 async function settle(harness, Component, props, rounds = 12) {
   let element = harness.render(Component, props)
   for (let index = 0; index < rounds; index += 1) {
@@ -260,7 +236,6 @@ async function settle(harness, Component, props, rounds = 12) {
   return element
 }
 
-/** Depth-first text content of a rendered element tree. */
 function textOf(node) {
   if (node === null || node === undefined || typeof node === 'boolean') return ''
   if (typeof node === 'string' || typeof node === 'number') return String(node)
@@ -271,7 +246,6 @@ function textOf(node) {
   return ''
 }
 
-/** First element in the tree satisfying a predicate. */
 function findElement(node, predicate) {
   if (node === null || node === undefined || typeof node !== 'object') return null
   if (Array.isArray(node)) {
@@ -322,7 +296,6 @@ const fakeServices = new Map()
 // ── Stubbed same-origin fetch (the only client transport) ───────────────────
 const fetchCalls = []
 
-/** Minimal Response shim: `ok`, `status`, and a JSON body reader. */
 function jsonResponse(body, status) {
   const code = status === undefined ? 200 : status
   return {
@@ -334,7 +307,6 @@ function jsonResponse(body, status) {
   }
 }
 
-/** Decode one recorded request body. */
 function sentBody(call) {
   try {
     return JSON.parse(call.init.body)
@@ -343,7 +315,6 @@ function sentBody(call) {
   }
 }
 
-/** Number of recorded `suggestions/wait` POSTs. */
 function waitCallCount() {
   return fetchCalls.filter((call) => {
     const body = sentBody(call)
@@ -351,7 +322,6 @@ function waitCallCount() {
   }).length
 }
 
-/** Per-test transport behavior; replaced by each check. */
 let fetchHandler = async () => jsonResponse({ ok: true, value: { suggestion: null, turn: null } })
 
 async function stubFetchImplementation(url, init) {
@@ -659,7 +629,6 @@ function makeComponentProps(state, face, actions, translate) {
   return { componentHarness, props }
 }
 
-/** Dispatch Tab at the given target through the apply-owned capture listener. */
 function dispatchTab(target, key) {
   const event = createKeyDownEvent(target)
   event.key = key === undefined ? 'Tab' : key
@@ -1015,7 +984,7 @@ check('only shipped theme alias tokens are referenced', () => {
 console.log('\n──────────────────────────────────────────────')
 if (failures.length === 0) {
   console.log(`CLIENT SMOKE PASSED: ${passed} checks.`)
-  console.log('Stub-driven contract check only; live Harness behavior is covered by plan \u00a77.2.')
+  console.log('Stub-driven contract check only; live Harness behavior: see docs/design.md \u00a77.3.')
   process.exit(0)
 }
 console.log(`CLIENT SMOKE FAILED: ${failures.length} failure(s), ${passed} passed.`)
