@@ -1,0 +1,30 @@
+# Followup Prompt bundle: one Host row. The browser half is discovered through
+# package.json `dsh.client` and the `./client` export; it needs no Loader row.
+#
+# A patch config replaces the whole entry config (never deep-merged), so every
+# field of the Host schema is restated here with its default. Users can edit
+# individual fields through Settings (volatile fields of this Loader row) or a
+# higher-priority profile patch, but then the complete config must be restated.
+- insert:
+    - id: followup-prompt
+      name: dsh-followup-prompt
+      config:
+        enabled: true
+        provider: ''
+        model: ''
+        reasoningEffort: ''
+        maxTokens: 160
+        timeoutMs: 15000
+        maxTurns: 0
+        maxInputChars: 20000
+        maxToolRejectRounds: 1
+        toolRejectionText: ''
+        maxSuggestionChars: 400
+        stripMedia: false
+        sampleRate: 1.0
+        prefetchOnTurnEnd: false
+        cacheTtlMs: 600000
+        maxConcurrent: 2
+        excludeSubagents: true
+        uiMode: dock
+        prompt: ''

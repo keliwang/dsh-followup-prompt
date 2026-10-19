@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" role="img" aria-label="Followup Prompt">
+  <defs>
+    <linearGradient id="fp-bg" x1="6" y1="2" x2="58" y2="62" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#4C8DFF"/>
+      <stop offset="1" stop-color="#7B5CFF"/>
+    </linearGradient>
+    <linearGradient id="fp-line" x1="20" y1="24" x2="42" y2="34" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#4C8DFF"/>
+      <stop offset="1" stop-color="#7B5CFF"/>
+    </linearGradient>
+  </defs>
+  <rect x="2" y="2" width="60" height="60" rx="16" fill="url(#fp-bg)"/>
+  <path d="M15 22a7 7 0 0 1 7-7h20a7 7 0 0 1 7 7v13a7 7 0 0 1-7 7H30l-8 6v-6h-0a7 7 0 0 1-7-7Z" fill="#FFFFFF" opacity="0.96"/>
+  <rect x="21" y="23" width="21" height="3" rx="1.5" fill="url(#fp-line)"/>
+  <rect x="21" y="30" width="14" height="3" rx="1.5" fill="url(#fp-line)" opacity="0.75"/>
+  <path d="M46 8.5l2.3 5.4 5.4 2.3-5.4 2.3L46 24.6l-2.3-5.4-5.4-2.3 5.4-2.3Z" fill="#FFD166"/>
+</svg>

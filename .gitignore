@@ -1,0 +1,16 @@
+# dependencies (dev-only link created by scripts/link-dev-deps.mjs)
+node_modules/
+
+# packaging artifacts
+*.tgz
+dsh-followup-prompt-*.tgz
+
+# test / tooling output
+coverage/
+verify/out/
+*.log
+
+# editor / OS noise
+.DS_Store
+.idea/
+.vscode/
