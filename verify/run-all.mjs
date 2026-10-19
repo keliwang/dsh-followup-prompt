@@ -344,7 +344,7 @@ try {
   // The browser half is loaded as a classic script by the ModuleLoader: an
   // import/export statement would parse only under ESM and never execute.
   if (/^\s*(?:import|export)\s/m.test(client)) throw new Error('client.js must be a classic script (no import/export)')
-  if (!client.includes("'conversation.composer.dock'")) throw new Error('composer dock slot is not registered')
+  if (!client.includes("'conversation.input.dock'")) throw new Error('composer input dock slot is not registered')
   if (!client.includes("'suggestions/wait'")) throw new Error('suggestions/wait endpoint is not called')
   if (!client.includes("'suggestions/dismiss'")) throw new Error('suggestions/dismiss endpoint is not called')
   if (!/fetch\(\s*['"]api\/followup-prompt\/rpc['"]/.test(client)) {

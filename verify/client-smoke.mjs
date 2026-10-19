@@ -11,7 +11,7 @@
  *
  *   - module id / inject array / apply face;
  *   - locale dictionary registration (en + zh, meta.title present);
- *   - `conversation.composer.dock` registration options and component;
+ *   - `conversation.input.dock` registration options and component;
  *   - the injected transport face (same-origin fetch to the exact Fetch route,
  *     envelope unwrap, silent failures, dismiss);
  *   - a tiny hook runtime that actually renders the component: idle edge →
@@ -452,11 +452,11 @@ check('locale dictionaries registered under the plugin namespace', () => {
   assert.equal(typeof dictionaries.zh['prediction.acceptHint'], 'string')
   return 'en + zh (meta.title/prediction.*)'
 })
-check('the composer dock slot is injected, then registered', () => {
-  assert.deepEqual(slotInjections, ['conversation.composer.dock'])
+check('the composer input dock slot is injected, then registered', () => {
+  assert.deepEqual(slotInjections, ['conversation.input.dock'])
   assert.equal(registrations.length, 1)
   const { options } = registrations[0]
-  assert.equal(options.name, 'conversation.composer.dock')
+  assert.equal(options.name, 'conversation.input.dock')
   assert.equal(options.id, 'followup-prompt')
   assert.equal(options.locale, 'followup-prompt')
   assert.equal(typeof options.order, 'number')
@@ -688,7 +688,7 @@ await checkAsync('idle edge requests once and mounts the bar', async () => {
   assert.equal(element.props['aria-live'], 'polite')
   assert.equal(element.props['data-followup-prompt'], '')
   assert.ok(String(element.props.style.maxWidth).includes('--dsh-composer-card-max-width'))
-  assert.ok(String(element.props.style.background).includes('--dsw-alias-bg-layer-2'))
+  assert.ok(String(element.props.style.background).includes('--dsw-alias-bg-layer-1'))
   assert.ok(textOf(element).includes('hello there'))
   assert.ok(textOf(element).includes('t:prediction.prefix'))
   assert.ok(textOf(element).includes('Tab'))
@@ -999,7 +999,7 @@ check('only shipped theme alias tokens are referenced', () => {
   const used = new Set([...source.matchAll(/--dsw-[a-z0-9-]+/gi)].map(match => match[0]))
   const unknown = [...used].filter(token => !allowed.has(token) && !token.startsWith('--dsw-radius-'))
   assert.deepEqual(unknown, [])
-  assert.ok(used.has('--dsw-alias-bg-layer-2'))
+  assert.ok(used.has('--dsw-alias-bg-layer-1'))
   assert.ok(used.has('--dsw-alias-border-l2'))
   return `${used.size} token(s), all shipped`
 })

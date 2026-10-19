@@ -3,7 +3,7 @@
  *
  * Lazy-CJS plugin loaded through `window.__ModuleLoader__` (no bundler, no JSX):
  * the browser module table hands us React, and we contribute one ambient
- * suggestion bar to the `conversation.composer.dock` slot. The bar shows the
+ * suggestion bar to the `conversation.input.dock` slot. The bar shows the
  * next-user-message prediction the Host generated for the latest completed
  * turn; Tab (or a click) accepts it into the composer as an editable draft.
  * It never sends, and every failure/state change degrades to "render nothing".
@@ -11,7 +11,7 @@
  * Contract sources verified against DSH 0.2.1-rc.2:
  * - module registration: packages/client/modules/src/client/manifest.ts
  * - slots: packages/client/ui-slots/src/index.ts + ui-renderer/src/client/registry.ts
- *   (`conversation.composer.dock` is a session-scope list slot declared by
+ *   (`conversation.input.dock` is a session-scope list slot declared by
  *   ui-conversation; third-party entries register via ctx.slots.inject/register)
  * - standard props: ui-conversation contract/slots.ts (SessionStandardProps),
  *   ui-session client/index.ts (sessionId/useSession), contract/input.ts
@@ -38,7 +38,7 @@ window.__ModuleLoader__.load({
 
     /** Locale namespace / loader row identity / slot identity. */
     const NS = 'followup-prompt'
-    const SLOT = 'conversation.composer.dock'
+    const SLOT = 'conversation.input.dock'
     const SLOT_ID = 'followup-prompt'
     /** After ui-chat's activity (0) and usage (1) pills; additive list order. */
     const SLOT_ORDER = 100
@@ -86,11 +86,11 @@ window.__ModuleLoader__.load({
         minWidth: 0,
         width: '100%',
         maxWidth: 'var(--dsh-composer-card-max-width, 952px)',
-        margin: '0 auto',
-        padding: '5px 6px 5px 10px',
+        margin: '0 auto 6px',
+        padding: '4px 6px 4px 10px',
         borderRadius: 'var(--dsw-radius-md, 10px)',
-        border: '1px solid var(--dsw-alias-border-l2, rgba(127, 127, 127, 0.28))',
-        background: 'var(--dsw-alias-bg-layer-2, rgba(127, 127, 127, 0.10))',
+        border: '1px solid var(--dsw-alias-border-l1, rgba(127, 127, 127, 0.18))',
+        background: 'var(--dsw-alias-bg-layer-1, rgba(127, 127, 127, 0.08))',
         color: 'var(--dsw-alias-label-secondary, currentColor)',
         fontFamily: 'inherit',
         fontSize: '12px',
@@ -246,7 +246,8 @@ window.__ModuleLoader__.load({
     // ── Template class (re-created per render; hook order is fixed) ─────────
     /**
      * Suggested next message bar, mounted as one list entry inside
-     * `conversation.composer.dock` for the current Session.
+     * `conversation.input.dock` (the full-width row above the composer card)
+     * for the current Session.
      *
      * Standard props consumed: sessionId, useSession, useInput, inputActions, t.
      * Injected props consumed: waitForSuggestion, dismissSuggestion,
