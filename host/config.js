@@ -22,9 +22,6 @@ import z from '@deepseek-ai/schemastery'
 /** Reasoning levels accepted for a prediction call; `''` follows the provider default. */
 export const REASONING_EFFORTS = Object.freeze(['', 'off', 'low', 'high', 'max'])
 
-/** Browser presentation modes; `dock` is the shipped suggestion bar. */
-export const UI_MODES = Object.freeze(['dock', 'ghost'])
-
 /** Accepted bounds applied by `resolveConfig()`. */
 export const LIMITS = Object.freeze({
   maxTokens: [1, 8192],
@@ -58,7 +55,6 @@ export const DEFAULTS = Object.freeze({
   cacheTtlMs: 600000,
   maxConcurrent: 2,
   excludeSubagents: true,
-  uiMode: 'dock',
   prompt: '',
 })
 
@@ -119,8 +115,6 @@ export const Config = z.object({
   maxConcurrent: boundedInteger('maxConcurrent', DEFAULTS.maxConcurrent),
   /** Skip sessions created as subagent children (`header.origin === 'subagent'`). */
   excludeSubagents: z.boolean().default(DEFAULTS.excludeSubagents).volatile(),
-  /** Browser presentation mode: suggestion bar (`dock`) or inline ghost text (`ghost`, P2). */
-  uiMode: z.union(UI_MODES).default(DEFAULTS.uiMode).volatile(),
   /** Advanced: replaces the built-in prediction instruction. Empty uses the built-in prompt. */
   prompt: z.string().max(LIMITS.prompt).default(DEFAULTS.prompt).volatile(),
 })
@@ -251,7 +245,6 @@ export function resolveConfig(raw) {
     cacheTtlMs: asInteger(readField(raw, 'cacheTtlMs'), ...LIMITS.cacheTtlMs, DEFAULTS.cacheTtlMs),
     maxConcurrent: asInteger(readField(raw, 'maxConcurrent'), ...LIMITS.maxConcurrent, DEFAULTS.maxConcurrent),
     excludeSubagents: asBoolean(readField(raw, 'excludeSubagents'), DEFAULTS.excludeSubagents),
-    uiMode: asEnum(readField(raw, 'uiMode'), UI_MODES, DEFAULTS.uiMode),
     prompt: asString(readField(raw, 'prompt'), DEFAULTS.prompt, LIMITS.prompt).trim(),
   })
 }
@@ -297,9 +290,6 @@ export function inspectConfig(raw) {
     if (typeof resolved === 'boolean' && typeof given !== 'boolean') issues.push(`${key}: not a boolean`)
     if (typeof resolved === 'string' && key === 'reasoningEffort' && given !== resolved) {
       issues.push(`${key}: ${JSON.stringify(given)} is not one of ${REASONING_EFFORTS.join('/')}`)
-    }
-    if (key === 'uiMode' && given !== resolved) {
-      issues.push(`${key}: ${JSON.stringify(given)} is not one of ${UI_MODES.join('/')}`)
     }
   }
   return { normalized, issues }

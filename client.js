@@ -649,6 +649,9 @@ window.__ModuleLoader__.load({
       // ── Keyboard bridge: hand the live bar to the apply-owned listener ───
       React.useEffect(function publishKeyboardBar() {
         if (typeof activateBar !== 'function') return undefined
+        // Session-scoped overlays can stay mounted for more than one composer;
+        // only the visible ghost may claim the Tab/Escape gesture.
+        if (!visible) return undefined
         return activateBar({
           sessionId: sessionId,
           isVisible: function isBarVisible() {
@@ -722,7 +725,7 @@ window.__ModuleLoader__.load({
 
       // The ghost stands where the native placeholder would be; hide that
       // placeholder while shown and restore its inline value on hide/unmount.
-      React.useEffect(function hideNativePlaceholder() {
+      useIsoLayoutEffect(function hideNativePlaceholder() {
         if (!visible || typeof document === 'undefined') return undefined
         let placeholder = null
         try {
@@ -963,8 +966,9 @@ window.__ModuleLoader__.load({
 
       ctx.effect(installKeyboardGuards, NS + ': composer keyboard guards')
 
-      ctx.slots.inject(SLOT, function registerSuggestionBar() {
-        return ctx.slots.register({
+      ctx.effect(function registerComposerGhost() {
+        return ctx.slots.inject(SLOT, function registerSuggestionBar() {
+          return ctx.slots.register({
           name: SLOT,
           id: SLOT_ID,
           order: SLOT_ORDER,
@@ -979,8 +983,9 @@ window.__ModuleLoader__.load({
               activateBar: activateBar,
             }
           },
-        }, FollowupSuggestionBar)
-      })
+          }, FollowupSuggestionBar)
+        })
+      }, NS + ': composer ghost entry')
     }
 
     return {

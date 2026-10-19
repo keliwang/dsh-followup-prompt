@@ -418,7 +418,7 @@ async function main() {
   await check('config: schema keys and resolved defaults', () => {
     const resolved = resolveConfig({})
     assertDeepEqual(CONFIG_KEYS, Object.keys(DEFAULTS), 'config key order')
-    assertEqual(CONFIG_KEYS.length, 19, 'config field count')
+    assertEqual(CONFIG_KEYS.length, 18, 'config field count')
     assertDeepEqual(Object.keys(resolved), CONFIG_KEYS, 'resolved key set')
     assertDeepEqual(JSON.parse(JSON.stringify(resolved)), { ...DEFAULTS }, 'resolved defaults')
   })
@@ -439,7 +439,6 @@ async function main() {
       sampleRate: volatile(5),
       maxConcurrent: volatile(0),
       cacheTtlMs: volatile(1),
-      uiMode: volatile('sparkles'),
       prompt: volatile('  Predict it.  '),
     })
     assertEqual(live.enabled, false, 'volatile enabled')
@@ -455,7 +454,6 @@ async function main() {
     assertEqual(live.sampleRate, 1, 'sampleRate capped')
     assertEqual(live.maxConcurrent, LIMITS.maxConcurrent[0], 'maxConcurrent clamped up')
     assertEqual(live.cacheTtlMs, LIMITS.cacheTtlMs[0], 'cacheTtlMs clamped up')
-    assertEqual(live.uiMode, 'dock', 'invalid uiMode falls back')
     assertEqual(live.prompt, 'Predict it.', 'prompt trimmed')
 
     const halfRoute = resolveConfig({ provider: 'only-provider' })
@@ -496,7 +494,7 @@ async function main() {
 
   await check('context: over-budget trimming cuts only at a human user boundary', async () => {
     const { session } = createSession('context-trim', { messages: contextMessages() })
-    const config = resolveConfig({ maxInputChars: 600 })
+    const config = resolveConfig({ maxInputChars: 900 })
     const messages = buildRequestMessages(session, config)
     assert(messages !== null, 'a fitting suffix exists')
     const history = messages.slice(0, -1)
@@ -505,7 +503,7 @@ async function main() {
     assertEqual(history[1].role, 'user', 'trim never starts on a tool result')
     const usedChars = history.reduce((sum, message) => sum + estimateMessageChars(message), 0)
       + FOLLOWUP_INSTRUCTION.length
-    assert(usedChars <= 600, `trimmed request stays within budget (used ${usedChars})`)
+    assert(usedChars <= 900, `trimmed request stays within budget (used ${usedChars})`)
 
     const tooSmall = buildRequestMessages(session, resolveConfig({ maxInputChars: 50 }))
     assertEqual(tooSmall, null, 'no safe cut point fits the budget: predict nothing')
@@ -521,8 +519,8 @@ async function main() {
     const { session: mediaSession } = createSession('context-media', {
       messages: contextMessages({ image: true }),
     })
-    const stripped = buildRequestMessages(mediaSession, resolveConfig({ maxInputChars: 800, stripMedia: true }))
-    const preserved = buildRequestMessages(mediaSession, resolveConfig({ maxInputChars: 800, stripMedia: false }))
+    const stripped = buildRequestMessages(mediaSession, resolveConfig({ maxInputChars: 1100, stripMedia: true }))
+    const preserved = buildRequestMessages(mediaSession, resolveConfig({ maxInputChars: 1100, stripMedia: false }))
     assert(stripped !== null && preserved !== null, 'media history trims')
     assertEqual(stripped[1].content[0].type, 'text', 'degraded + stripMedia projects media to text')
     assert(stripped[1].content[0].text.includes('image omitted'), 'media placeholder text')
@@ -546,11 +544,10 @@ async function main() {
   })
 
   await check('config: inspectConfig reports clamped values', () => {
-    const inspected = inspectConfig({ timeoutMs: 1, sampleRate: 2, uiMode: 'hologram', enabled: 'yes' })
+    const inspected = inspectConfig({ timeoutMs: 1, sampleRate: 2, enabled: 'yes' })
     assert(inspected.issues.length >= 3, `expected clamping issues, observed ${JSON.stringify(inspected.issues)}`)
     assertEqual(inspected.normalized.timeoutMs, 2000, 'clamped timeout reported')
     assert(inspected.issues.some((issue) => issue.startsWith('sampleRate')), 'sampleRate issue reported')
-    assert(inspected.issues.some((issue) => issue.startsWith('uiMode')), 'uiMode issue reported')
     assert(inspected.issues.some((issue) => issue.startsWith('enabled')), 'enabled type issue reported')
   })
 
@@ -1024,6 +1021,59 @@ async function main() {
       assertEqual(value.suggestion, null, 'duplicate ids abandon')
       assertEqual(value.reason, PREDICTION_REASONS.toolRejected, 'tool-rejected reason')
       assertEqual(harness.calls.length, 1, 'invalid pairing is not retried')
+    } finally {
+      await harness.disposeAll()
+    }
+  })
+
+  await check('tool-calls: reusing a rejected call id in a later round abandons', async () => {
+    const harness = createHarness({
+      config: { ...DEFAULTS, maxToolRejectRounds: 2 },
+      streams: () => toolCallChunks([
+        { id: 'call-reused', name: 'fs_read', arguments: '{}' },
+      ]),
+    })
+    try {
+      const { session, events } = createSession('session-tools-reuse')
+      harness.addSession(session)
+      seedCompletedTurn(harness, session, events, 1)
+      const value = valueOf(await wait(harness, {
+        sessionId: 'session-tools-reuse', turn: 1, waitMs: 2000,
+      }))
+      assertEqual(value.suggestion, null, 'reused id abandons')
+      assertEqual(value.reason, PREDICTION_REASONS.toolRejected, 'tool-rejected reason')
+      assertEqual(harness.calls.length, 2, 'the reused id is not sent a third time')
+    } finally {
+      await harness.disposeAll()
+    }
+  })
+
+  await check('timeout: a slow generation survives waitMs and serves a later poll', async () => {
+    let release
+    const gate = new Promise((resolve) => {
+      release = resolve
+    })
+    const harness = createHarness({
+      streams: () => (async function* stream() {
+        await gate
+        yield* textChunks('Slow suggestion')
+      })(),
+    })
+    try {
+      const { session, events } = createSession('session-slow')
+      harness.addSession(session)
+      seedCompletedTurn(harness, session, events, 1)
+      const timedOut = valueOf(await wait(harness, { sessionId: 'session-slow', turn: 1, waitMs: 50 }))
+      assertEqual(timedOut.reason, 'timeout', 'the poll times out')
+      assertEqual(harness.calls.length, 1, 'one generation started')
+      release()
+      await flush()
+      await delay(20)
+      const later = valueOf(await wait(harness, {
+        sessionId: 'session-slow', turn: 1, waitMs: 2000,
+      }))
+      assertEqual(later.suggestion, 'Slow suggestion', 'a later poll observes the cached result')
+      assertEqual(harness.calls.length, 1, 'no second model call')
     } finally {
       await harness.disposeAll()
     }

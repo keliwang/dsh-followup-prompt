@@ -26,5 +26,4 @@
         cacheTtlMs: 600000
         maxConcurrent: 2
         excludeSubagents: true
-        uiMode: dock
         prompt: ''

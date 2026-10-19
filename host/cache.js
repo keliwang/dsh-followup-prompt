@@ -232,8 +232,10 @@ export class PredictionCache {
    *
    * Returns immediately for a terminal entry (including a cached null), shares
    * a running generation with other waiters, and maps expiry/cancellation to
-   * `timeout`/`aborted`. A caller abort only removes its waiter; the last
-   * waiter leaving cancels an unobserved, non-prefetched generation.
+   * `timeout`/`aborted`. Explicit cancellation (the caller's signal) only
+   * removes its waiter and aborts an unobserved, non-prefetched generation when
+   * nobody is left to observe it; a plain `waitMs` timeout leaves the
+   * generation running so a later poll can still observe the cached result.
    *
    * @param {object} input - wait request.
    * @param {object} input.session - live Session.
@@ -257,8 +259,9 @@ export class PredictionCache {
 
     const waiter = Symbol('followup-prompt-waiter')
     entry.waiters.add(waiter)
+    let outcome = 'aborted'
     try {
-      const outcome = await waitForSettlement(
+      outcome = await waitForSettlement(
         entry.promise,
         Math.max(0, finite(waitMs, DEFAULT_WAIT_MS)),
         signal,
@@ -268,7 +271,11 @@ export class PredictionCache {
       return { suggestion: null, turn: entry.turn, reason: outcome === 'aborted' ? 'aborted' : 'timeout' }
     } finally {
       entry.waiters.delete(waiter)
-      this.#abortIfUnobserved(entry)
+      // Only explicit caller cancellation releases the work: a plain waitMs
+      // timeout ends this poll, but the prediction may still settle into the
+      // cache for a later wait (the client can re-poll; a reopened session can
+      // catch up). Aborting here would silently discard slow predictions.
+      if (outcome !== 'timeout' || signal?.aborted === true) this.#abortIfUnobserved(entry)
     }
   }
 

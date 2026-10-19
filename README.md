@@ -17,7 +17,7 @@
 | 包结构与清单（package.json / patch / locale / icon / files / exports） | ✅ 已完成 |
 | Host 半边（触发、继承式一次性调用、tool-rejection、缓存、RPC 通道、Config） | ✅ 骨架实现完成 |
 | Client 半边（`conversation.input.overlay` 内联 ghost（输入框内）、Tab 接受、IME、i18n、静默失败） | ✅ 实现完成 |
-| 离线验证（语法、清单、manifest、桩驱动冒烟、pack 文件清单） | ✅ `npm test`（32 项检查；Host 冒烟 33 条、Client 冒烟 40 条断言） |
+| 离线验证（语法、清单、manifest、桩驱动冒烟、pack 文件清单） | ✅ `npm test`（32 项检查；Host 冒烟 35 条、Client 冒烟 40 条断言） |
 | 安装到真实 profile（Desktop，2026-10-19） | ✅ `application: applied`，无 warnings；Host row `active` |
 | Host 真机生成（真实 LLM 建议 + dismiss） | ✅ 已通过（见下文「真机验收记录」） |
 | Client 真机注册（input.overlay occupant） | ✅ `followup-prompt` order 100 `active`（输入框内 ghost） |
@@ -107,7 +107,6 @@ Host `Config`（schemastery，全部字段 `.volatile()`）会在 **Settings →
 | `cacheTtlMs` | `600000` | 进程内缓存 TTL。 |
 | `maxConcurrent` | `2` | 全局并发上限；超限返回 `busy`。 |
 | `excludeSubagents` | `true` | 子代理会话不预测。 |
-| `uiMode` | `'dock'` | v1 仅实现 `dock`（建议条）；`ghost` 为 P2。 |
 | `prompt` | `''` | 高级：覆盖默认预测指令。 |
 
 ## 隐私与计费
@@ -190,10 +189,10 @@ dsh-followup-prompt/
 **已完成的离线检查**（`npm test`，共 32 项检查，全部通过）：
 
 - 所有运行时 JS `node --check`；`package.json` manifest / exports / `files` 完整性；
-- locale JSON、icon SVG、`cordis.patch.yml` 结构（19 个字段齐全、无 unknown key，且**逐项等于** `host/config.js` 的 `DEFAULTS`）；
+- locale JSON、icon SVG、`cordis.patch.yml` 结构（18 个字段齐全、无 unknown key，且**逐项等于** `host/config.js` 的 `DEFAULTS`）；
 - `Config` schema 实测：19 个默认值、volatile live refs 解包、越界值拒绝、provider/model 必须成对；
-- Host 入口契约（name/inject 三项: connection/llm/sessions + `/api` Fetch route/Config/apply）与 Client 契约（classic script 无 import/export、ModuleLoader id、dock slot、`api/followup-prompt/rpc` + `credentials: same-origin`、`[data-composer-input]` 门、无 `submit()`）；
-- Host 桩驱动冒烟 **33 条**（/api 路由注册一次且 shape 正确、turn/end 触发一次调用、缓存命中不重复计费、dismiss→stale、坏请求/未知 endpoint 信封、tool-call 拒绝的配对合法性/轮次上限/重复 callId、采样、并发 busy、abort 语义、prefetch、TTL、子代理排除、裁剪/turn cap/stripMedia、卸载清理）；
+- Host 入口契约（name/inject 三项: connection/llm/sessions + `/api` Fetch route/Config/apply）与 Client 契约（classic script 无 import/export、ModuleLoader id、input.overlay slot、`api/followup-prompt/rpc` + `credentials: same-origin`、`[data-composer-input]` 门、无 `submit()`）；
+- Host 桩驱动冒烟 **35 条**（/api 路由注册一次且 shape 正确、turn/end 触发一次调用、缓存命中不重复计费、dismiss→stale、坏请求/未知 endpoint 信封、tool-call 拒绝的配对合法性/轮次上限/重复 callId、采样、并发 busy、abort 语义、prefetch、TTL、子代理排除、裁剪/turn cap/stripMedia、跨轮 tool-call id 复用、waitMs 超时后生成继续、卸载清理）；
 - Client 桩驱动冒烟 **40 条**（模块 id/inject/apply、locale+slot 注册、fetch 请求 shape/AbortSignal/静默失败、状态机渲染路径、Tab 接受 insertText/回退 setDraft、IME/草稿/running 隐藏、缓存复显、关闭/Esc、源码护栏）；
 - `pnpm pack --dry-run` 打包文件清单（含 host/、client.js、patch、locale、icon、docs/protocol.md、README、LICENSE）。
 
@@ -215,7 +214,7 @@ dsh-followup-prompt/
 1. `ctx.connection.rpc.handle()` 在 0.2.1 上激活失败：`cannot get property "webServer" without inject`
    （RPC 注册器用 Connection 服务自身的 ctx 读 `webServer`，调用方的 inject 不生效；in-repo 插件无一处使用该路径）。
    → 改为 `ctx.connection.fetch.register` 的 `/api/followup-prompt/rpc` exact Fetch 路由（ds-bot 同款）。
-2. 预测请求继承了源会话 `reasoningEffort: max`，在 `maxTokens: 160` 下 finish=max-tokens、无文本建议。
+2. 预测请求继承了源会话 `reasoningEffort: max`，在旧默认 `maxTokens: 160` 下 finish=max-tokens、无文本建议。
    → 默认改为 `reasoningEffort: 'off'` + `maxTokens: 400`（见配置表），真机重测即返回建议。
 
 **仍需人工在页面上确认**

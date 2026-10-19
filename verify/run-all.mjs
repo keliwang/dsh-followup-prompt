@@ -45,7 +45,6 @@ const EXPECTED_CONFIG_KEYS = [
   'cacheTtlMs',
   'maxConcurrent',
   'excludeSubagents',
-  'uiMode',
   'prompt',
 ]
 

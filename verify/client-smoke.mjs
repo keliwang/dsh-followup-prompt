@@ -11,7 +11,7 @@
  *
  *   - module id / inject array / apply face;
  *   - locale dictionary registration (en + zh, meta.title present);
- *   - `conversation.input.dock` registration options and component;
+ *   - `conversation.input.overlay` registration options and component;
  *   - the injected transport face (same-origin fetch to the exact Fetch route,
  *     envelope unwrap, silent failures, dismiss);
  *   - a tiny hook runtime that actually renders the component: idle edge →
