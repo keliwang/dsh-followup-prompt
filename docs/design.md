@@ -258,14 +258,15 @@ DSH 升级后核对：slot 名与 standardProps；`data-composer-input`/`-placeh
 
 ```bash
 npm version patch          # 改 version、提交并打 vX.Y.Z tag；预发布用 npm version prerelease --preid rc
+npm publish                # 本地发布，prepublishOnly 先跑 npm test；预发布用 npm publish --tag next
 git push --follow-tags
 ```
 
-推送 `v*` tag 触发 `.github/workflows/release.yml`：校验 tag 与 `package.json` 版本一致 → `npm run deps:ci` + `npm test` → `npm publish` → `gh release create`（附 `npm pack` 产物，自动生成 release notes）。带 `-` 后缀的版本发到 npm 的 `next` dist-tag，GitHub release 标为 prerelease。npm 发布失败时不会创建 release；若 npm 已发布而 release 失败，手动补 `gh release create <tag>`，不要重跑整个 job。
+npm 在本地发布（需 `npm login`，按提示输入 2FA 验证码），先 publish 再 push，发布失败时 tag 不会推出去。本地跑测试需要 peer 依赖，没有时先 `npm run links` 或 `npm run deps:ci`。
 
-- 认证走 npm Trusted Publishing（OIDC），仓库里不存 token，provenance 自动生成；`repository.url` 必须与 GitHub 仓库一致。
+推送 `v*` tag 触发 `.github/workflows/release.yml`：校验 tag 与 `package.json` 版本一致 → `npm run deps:ci` + `npm test` → `gh release create`（附 `npm pack` 产物，自动生成 release notes）。带 `-` 后缀的版本 GitHub release 标为 prerelease。
+
 - CI 没有 Harness，`deps:ci` 从 npm 安装 peer：`dsh-llm` 固定为与版本基线一致的 `0.2.1-rc.2`（它的 `latest` dist-tag 是更旧的 `0.0.1-rc.1`，测试会失败）。升级 Harness 基线时同步修改。
-- 首次发布需在本地 `npm login && npm publish`，之后在 npmjs.com 的包设置 → Trusted Publisher 中登记 `keliwang/dsh-followup-prompt` 与 `release.yml`。
 
 ## 8. 风险与技术债
 
