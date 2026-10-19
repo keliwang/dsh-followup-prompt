@@ -17,26 +17,35 @@
 - [费用与隐私](#费用与隐私)
 - [常见问题](#常见问题)
 - [已知限制](#已知限制)
-- [卸载](#卸载)
+- [升级与卸载](#升级与卸载)
 - [开发](#开发)
 - [License](#license)
 
 ## 环境要求
 
-- DeepSeek Harness `>=0.2.0 <0.3.0`（已在 0.2.1-rc.2 上验证）
+- DeepSeek Harness `>=0.2.0 <0.3.0`（已在 0.2.1-rc.2 上验证），并且已经配置好至少一个模型。插件默认使用当前会话的模型。
 
 ## 安装
 
-> [!WARNING]
-> 安装会修改当前 profile 的 `package.json` 和 lock 文件，需要授予完整权限。建议先在一个可以随时丢弃的测试 profile 中试用。
+**Harness Desktop（Windows、macOS）**
 
-1. 在 Harness 中让 agent 调用 `plugin_manager` → `install_bundle`，`target` 填写以下任意一种：
-   - npm 包名 `dsh-followup-prompt`（推荐）；
-   - `.tgz` 文件的**绝对路径**。`.tgz` 可以从 [GitHub Releases](https://github.com/keliwang/dsh-followup-prompt/releases) 下载，也可以在本仓库执行 `pnpm pack` 生成。
-2. 刷新页面。
+1. 侧栏点 **插件** → **添加插件**。
+2. **包名或地址** 填 `dsh-followup-prompt`。在中国大陆，**安装源** 选 **中国大陆镜像源**。
+3. 点 **安装**，再点 **立即启用**，然后刷新页面。如果提示“请重启 DSH”，完全退出 Harness 再打开。
+
+连不上 npm 时，第 2 步也可以填 [Releases](https://github.com/keliwang/dsh-followup-prompt/releases) 里下载的 `dsh-followup-prompt-<版本>.tgz` 的完整路径。
+
+**Harness Web（Windows、macOS、Linux）**
+
+需要 Node.js `22.19` 以上和 pnpm。
+
+```sh
+npx @deepseek-ai/dsh@0.2.1-rc.2 plugin --profile web add dsh-followup-prompt
+npx @deepseek-ai/dsh@0.2.1-rc.2 web
+```
 
 > [!NOTE]
-> 请通过 `.tgz` 或 npm 包安装，不要直接安装源码目录。目录安装时插件找不到 Harness 自带的依赖，会加载失败。
+> 不要用源码目录安装（**包名或地址** 填本仓库路径）。目录安装时插件找不到 Harness 自带的依赖，会加载失败。需要本地构建时，在本仓库执行 `pnpm pack`，安装生成的 `.tgz`。
 
 ### 验证安装
 
@@ -118,17 +127,30 @@
 
 </details>
 
+<details>
+<summary><b>装上的不是最新版本</b></summary>
+
+Harness 用 pnpm 安装插件，pnpm 默认会暂缓安装刚发布不久的版本（`minimumReleaseAge`），这时会装上上一个版本，安装完成界面会写明实际装入的版本。过一段时间再按[升级](#升级与卸载)步骤重装即可。
+
+</details>
+
 ## 已知限制
 
 - 预测的显示位置依赖 Harness 输入框的内部结构，Harness 升级后可能错位。遇到问题时，可以先把 `enabled` 设为 `false` 临时关闭。
 - 预测请求不会出现在会话记录中，无法事后查看或重放。
 
-## 卸载
+## 升级与卸载
 
-1. 让 agent 调用 `plugin_manager` → `remove_bundle`，参数为 `dsh-followup-prompt`。
-2. 刷新页面，必要时重启 Harness。
+**Harness Desktop**：在 **插件** → **已安装插件** 中打开 **后续提示**（英文界面为 Followup Prompt），点 **卸载**。升级时先卸载，再按[安装](#安装)步骤重新安装。
 
-如果只是想暂时停用，把 `enabled` 设为 `false` 即可。
+**Harness Web**：
+
+```sh
+npx @deepseek-ai/dsh@0.2.1-rc.2 plugin --profile web add dsh-followup-prompt@latest   # 升级
+npx @deepseek-ai/dsh@0.2.1-rc.2 plugin --profile web remove dsh-followup-prompt      # 卸载
+```
+
+完成后刷新页面，必要时重启 Harness。如果只是想暂时停用，在插件页关掉它的开关，或把 `enabled` 设为 `false`。
 
 ## 开发
 
