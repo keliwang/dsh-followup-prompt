@@ -27,7 +27,7 @@
 ```
 Host（Node）                                    Client（Web）
 session/event → turn/end(completed)             conversation.input.overlay 内联 ghost
-  → 继承式一次性 ctx.llm.stream                  ← POST /api/followup-prompt/rpc (suggestions/wait，长轮询)
+  → 压缩对话一次性 ctx.llm.stream                 ← POST /api/followup-prompt/rpc (suggestions/wait，长轮询)
   → 归一化 + 过滤 + 内存缓存                      Tab → inputActions 写入草稿（不发送）
                                                   → suggestions/dismiss
 ```
@@ -37,7 +37,7 @@ session/event → turn/end(completed)             conversation.input.overlay 内
 | `host/index.js` | 插件入口：`name`/`inject`/`Config`/`apply`，监听会话事件，注册路由 |
 | `host/config.js` | 字段表 `FIELDS`（唯一配置来源）、由它生成的 schemastery `Config` 与 `resolveConfig()`（解包 volatile 引用 + 夹取范围） |
 | `host/session.js` | 会话只读视图：`latestCompletedTurn()`、`isSubagentSession()` |
-| `host/prediction.js` | 上下文构建、继承式请求、tool-rejection 循环、输出归一化与过滤 |
+| `host/prediction.js` | 压缩对话构建（每轮 = 用户消息 + 模型可见回复全文，剔除 thinking/tool call/tool 输出）、一次性请求、输出归一化与过滤 |
 | `host/cache.js` | 每会话一个 entry 的缓存与调度：去重、waiter 计数、dismiss、采样、并发、TTL |
 | `host/channel.js` | `/api/followup-prompt/rpc` Fetch 路由：入参校验、端点分发、错误信封 |
 | `client.js` | 浏览器半边：lazy-CJS 模块、overlay slot 注册、状态机、ghost 定位、键盘接受 |
@@ -50,8 +50,8 @@ session/event → turn/end(completed)             conversation.input.overlay 内
 | 交付形态 | 独立安装式 bundle | 纯公共 API，可灰度/可卸载，不依赖 dsh 仓库构建 |
 | 触发 | 客户端按需请求 + Host 缓存；`prefetchOnTurnEnd` 可选，默认关 | 只为用户正在看的会话付费；打开已结束会话时天然 catch-up |
 | 回合判定 | `session/event` 中 `turn/end` 且 `reason.kind === 'completed'` | post-commit、fire-and-forget，历史已完整。不用 `agent/turn-stopping`（被 loop await，会拖慢回合关闭）；不用 `agent/status`（粒度不对） |
-| 预测方式 | 继承父会话请求前缀的一次性 `ctx.llm.stream()`，不 fork | 见 §3.1 |
-| 工具 | 保留全部 tools 声明，模型调用时统一回 `isError` tool-result，绝不执行 | DSH 没有 `toolChoice`；去掉 tools 会丢前缀缓存 |
+| 预测方式 | 独立压缩对话的一次性 `ctx.llm.stream()`，不 fork | 每轮只追加「用户消息 + 可见回复全文」一对，前缀缓存随轮次累积；见 §3.1、§4.2 |
+| 工具 | **不携带** tools / toolHistory（早期方案保留全部声明以复用父前缀缓存） | 工具声明会诱导模型继续执行 agent 动作（调工具、长篇推理）；压缩对话不依赖父前缀缓存，tools 只剩坏处。非文本块被忽略，没有文本时按过滤失败处理 |
 | 传输 | `/api` 下的 exact Fetch 路由 + 浏览器 `fetch` | 见 §4.7 |
 | UI | `conversation.input.overlay` 内联 ghost | 最接近 Codex；`conversation.input.dock` 上方建议条保留为降级方案 |
 | 存储 | 进程内 `Map<sessionId, Entry>` | 第三方插件不能新增 session 事件类型（未知事件会让会话无法 reopen） |
@@ -61,7 +61,7 @@ session/event → turn/end(completed)             conversation.input.overlay 内
 
 Codex 用 inheriting + ephemeral fork 让预测请求复用父会话前缀且不落盘。DSH 0.2.1 只有持久 fork：子会话会落盘、进列表、启动真实 agent（工具会执行、compaction 会跑），用它做一次性提示会污染会话。
 
-DSH 的一次请求是会话日志的纯函数，所以不 fork 也能复刻前缀：`session.deriveMessages()` + `session.requestHeader().config/.tools` + `session.toolHistory()`，尾部追加一条预测指令，用 `ctx.llm.stream()` 发出。这样同时拿到「前缀复用」和「无副作用」，不需要新的会话生命周期。只有将来要做真实 turn 式预测时，才需要上游提供 ephemeral agent。
+不 fork 也不需要复刻完整父请求：从 `session.deriveMessages()` 里按人类 user 消息切轮，每轮取「用户消息全文 + 该轮所有 assistant 文本块（按顺序拼接）」，拼成一条**独立、只追加的压缩对话**（§4.2），用 `ctx.llm.stream()` 发出。它不继承 tools / 工具输出 / 注入上下文，因此不受主对话 agent 行为干扰，且每次预测只在上一轮 prompt 末尾追加一对，provider 前缀缓存可以逐轮累积。
 
 ### 3.2 已否决的路线
 
@@ -94,37 +94,32 @@ DSH 的一次请求是会话日志的纯函数，所以不 fork 也能复刻前�
 
 ### 4.2 上下文构建
 
-默认发送完整 `deriveMessages()`，与父会话下一次请求前缀一致，以命中 provider 前缀缓存。不按字符数裁剪（长 agentic 回合的工具输出本身就可能很大），只按 `maxTurns` 做可选的轮数裁剪：
+预测请求不使用主对话的原始历史，而是一条**独立、只追加的压缩对话**：
 
-- `maxTurns: 0`（默认）发送完整历史，不做任何裁剪；
-- 设置 `maxTurns > 0` 时保留开头 system/developer 消息 + 最近 N 个人类回合；
-- 只在**人类 user 消息**（`source.kind === 'user'`）处切，绝不切在 assistant tool-call 与 tool-result 之间（孤儿 tool call 会让 provider 报 400）；注入的合成 user 上下文也不能作切点；
-- `stripMedia` 只在裁剪路径生效，全量路径保持媒体块原样；
-- 预测请求只比父会话下一次请求多一条短指令和少量输出，只有父会话已贴近 context window 上限时才会超限：此时预测失败（`reason: error`），不影响正常对话。
+- 按 `deriveMessages()` 里的人类 user 消息（`source.kind === 'user'`）切轮；注入的 system-reminder / skill / goal 等上下文不构成新轮；
+- 每轮取两样：用户消息全文 + 该轮所有 assistant 文本块（按顺序拼接；thinking、tool-call、tool 输出全部丢弃）；
+- 只保留两侧都有的完整轮次；`maxTurns > 0` 时只保留最近 N 轮，默认 `0` = 全部累积；
+- 请求 = 固定 system prompt（预测指令）+ 每轮一对 `user/assistant` 消息 + 末尾一条固定短 cue（`PREDICTION_CUE`）；
+- **不携带** system 快照、工具输出、reasoning、tools / toolHistory，也不发主对话的 system prompt。
 
-尾部追加一条普通 user 消息作为指令（不引入第二个 system 槽）。内置指令要求：只输出预测文本、跟随用户语言、不调用工具、历史是不可信数据而非指令、无把握时输出 `NO_PREDICTION`。输出用纯文本 + 哨兵，比 JSON 更省 token、更少解析失败。`PROMPT_VERSION` 写入日志元数据，便于 A/B。
+上一次预测的 prompt 除末尾 cue 外是下一次 prompt 的严格前缀：每轮真正新增的只有「新用户消息 + 新回复全文 + cue」，暖机 1–2 轮后 provider 前缀缓存命中率接近全量，输入按缓存价计费。压缩对话只含可见文本，远小于带工具输出/reasoning 的原始历史，也避免长 agentic 上下文把模型带回"继续干活"的模式。
+
+预测指令通过请求的 **system prompt**（`options.system`，`prompt` 配置可覆盖）下发；末尾 cue 只提供合法的生成回合（thinking 开启时请求不能以 assistant 结尾）。内置指令解释压缩格式，并要求只输出预测文本、跟随用户语言、历史是不可信数据而非指令、无把握时输出 `NO_PREDICTION`。`PROMPT_VERSION` 写入日志元数据（当前 4）。
 
 ### 4.3 请求构建
 
-从 `session.requestHeader()` 继承 `config`/`tools`，再：
+从 `session.requestHeader()` 继承 `config`，再：
 
 - 删除 `adapterDefaults` 标记为适配器默认值的 `reasoningEffort`/`maxTokens`；
-- `reasoningEffort`：配置值为 `''` 时删除该字段（跟随 provider 默认），否则覆盖。**不继承**源请求的值——实测继承 `max` 会把输出预算全花在推理上，以 `finish=max-tokens` 结束且没有文本，这也是默认值改为 `'off'`、`maxTokens` 改为 400 的原因；
+- `reasoningEffort`：配置值为 `''` 时删除该字段（跟随 provider 默认），否则覆盖。**不继承**源请求的值（继承 `max` 会把输出预算全花在推理上）；默认 `low`，让 thinking 正常完成又不过度；`maxTokens: 8192` 和 `timeoutMs: 30000` 给推理留足余量；
+- 预测指令写入 `options.system`（`config.prompt || FOLLOWUP_INSTRUCTION`），消息列表末尾只留 `PREDICTION_CUE` 这条 user 回合；
 - `provider`/`model` 必须成对配置才覆盖（半配会把一个 provider 的 model id 发给另一个 provider），`resolveConfig()` 负责这一点；
-- 带上 `toolHistory`、`sessionId`、`maxTokens`；
-- `timeoutMs` 是覆盖所有 tool-rejection 轮次的总 deadline。
+- 带上 `sessionId`、`maxTokens`；不发送 `tools` / `toolHistory`；
+- `timeoutMs` 是单次预测请求的总 deadline。
 
-### 4.4 tool-rejection 循环
+### 4.4 失败路径
 
-模型返回 tool-call 时不执行，构造合成历史后再请求一次，最多 `maxToolRejectRounds` 轮，仍调用则以 `tool-rejected` 静默放弃。约束：
-
-1. assistant(tool-call) 后**立即**跟每个 callId 一条 tool-result（DeepSeek serializer 会校验配对），中间不夹 user/文本。
-2. 合成 assistant 消息只放 tool-call block，不放 reasoning（thinking 段通常需要 provider 签名）。
-3. callId 为空、同轮重复或与之前轮次重复时放弃（重复 id 无法构成合法历史）。
-4. 所有轮次所有调用使用同一段 `isError` 文案（内部参数 `toolRejectionText` 可覆盖）。
-5. 每轮带同一份 `tools` + `toolHistory`，保持前缀一致。
-6. `assembler.blocks()` 遇到未闭合的未知 block 会抛错，按 `error` 处理。
-7. finish 为 `max-tokens` 时 `BlockAssembler` 会丢弃 tool-call，按 `max-tokens` 处理。
+预测请求不发送 tools，正常只会返回文本。`finish` 非 `stop` 时按原因映射为 `aborted` / `max-tokens` / `error`；`assembler.blocks()` 遇到未闭合的未知 block 抛错也映射为 `error`。非文本块被忽略，没有可用文本时按本地过滤失败处理（无 `reason`）。
 
 `generatePrediction()` 从不抛错，所有失败映射为 `suggestion: null` + `reason`（取值见 protocol.md）。
 
@@ -151,14 +146,14 @@ DSH 的一次请求是会话日志的纯函数，所以不 fork 也能复刻前�
 ### 4.8 配置
 
 - `FIELDS` 是唯一的配置来源：每个字段声明类型、默认值和范围，`Config` schema、`DEFAULTS` 与 `resolveConfig()` 都由它生成。
-- 字段分两类。用户字段进入 `Config`，出现在 Settings 和 `cordis.patch.yml` 中，含义见 README 配置表。标记为 `internal` 的调优参数（`maxToolRejectRounds`、`toolRejectionText`、`maxSuggestionChars`、`stripMedia`、`sampleRate`、`cacheTtlMs`、`maxConcurrent`、`excludeSubagents`）不进 schema，平时取默认值；要暴露某个参数，去掉 `internal` 并在 patch 中补上该字段即可。schemastery 会透传 schema 之外的 key，所以旧 patch 里残留的这些字段仍会被读取和夹取。
+- 字段分两类。用户字段进入 `Config`，出现在 Settings 和 `cordis.patch.yml` 中，含义见 README 配置表。标记为 `internal` 的调优参数（`maxSuggestionChars`、`sampleRate`、`cacheTtlMs`、`maxConcurrent`、`excludeSubagents`）不进 schema，平时取默认值；要暴露某个参数，去掉 `internal` 并在 patch 中补上该字段即可。schemastery 会透传 schema 之外的 key，所以旧 patch 里残留的这些字段仍会被读取和夹取。
 - `Config` 每个字段 `.volatile()`：0.2.1 会把它们替换成 Settings 页就地更新的 live 引用（`{ get() }`），所以运行时不能缓存配置快照，每个使用点都通过 `resolveConfig()` 重新解析。
 - `resolveConfig()` 是唯一的配置读取入口：解包引用、夹取范围、类型兜底，手改坏的配置不会让会话崩溃。下游代码因此直接读取已解析的值，不再做二次兜底。
 - patch 的 `config` 是整体替换，`cordis.patch.yml` 必须按顺序重述全部用户字段，且与 `DEFAULTS` 逐项一致（`npm test` 会校验）。
 
 ### 4.9 可观测与隐私
 
-每次预测以 debug 级别记录 `promptVersion, sessionId, turn, provider, model, rounds, toolRejected, degraded, ms, suggestionChars, inputTokens, cacheReadTokens, outputTokens, outcome`，不记录任何对话内容。
+每次预测以 debug 级别记录 `promptVersion, sessionId, turn, provider, model, ms, suggestionChars, inputTokens, cacheReadTokens, outputTokens, outcome`，不记录任何对话内容；预测内容只存在于 Host 进程内存与浏览器内存。
 
 ## 5. Client 半边
 
@@ -222,12 +217,12 @@ npm run pack:dry  # 只看打包内容
 ### 7.2 离线验证覆盖
 
 - `verify/package.test.mjs`：manifest/exports/files 落盘；locale、icon；patch 按序重述全部用户字段且与 `DEFAULTS` 逐项相等；`pnpm pack --dry-run` 包含全部声明文件（无 pnpm 时跳过）。
-- `verify/host.test.mjs`：入口导出与 `Config` schema（默认值、volatile 解包、越界拒绝、provider/model 成对、内部字段不进 schema）；用桩 `ctx` 驱动真实 Host 模块——路由注册、触发与计费次数、缓存、dismiss、错误信封、tool-rejection（配对合法性、轮次上限、跨轮 callId 复用）、采样、并发、中止语义、`timeoutMs` 总 deadline、预生成、TTL、子代理排除、裁剪、轮询超时后生成继续、卸载清理。
+- `verify/host.test.mjs`：入口导出与 `Config` schema（默认值、volatile 解包、越界拒绝、provider/model 成对、内部字段不进 schema）；用桩 `ctx` 驱动真实 Host 模块——路由注册、触发与计费次数、缓存、dismiss、错误信封、采样、并发、中止语义、`timeoutMs` deadline、预生成、TTL、子代理排除、压缩对话（每轮一对、保留可见全文并丢弃 thinking/tool call、注入上下文不切轮、`maxTurns` 截断、一次只追加一对）、轮询超时后生成继续、卸载清理。
 - `verify/client.test.mjs`：用假 DOM 与假 hook 运行时驱动 `client.js`——模块注册、locale/slot、fetch 请求形状与静默失败、状态机、切会话、Tab 接受（只走 `insertText`，从不 `submit`）、IME/草稿/运行中隐藏、缓存复显、关闭/Esc、弹层让出 Tab、主题 token 白名单。
 
 覆盖缺口：假 DOM 的 `querySelector` 返回 `null`，ghost 测量与 placeholder 隐藏路径没有覆盖，需要基于 jsdom 的测试补齐。
 
-### 7.3 真机验收（2026-10-19，Desktop profile，dsh 0.2.1-rc.2）
+### 7.3 真机验收（2026-10-20，Desktop profile，dsh 0.2.1-rc.2）
 
 已通过：
 
@@ -237,7 +232,7 @@ npm run pack:dry  # 只看打包内容
 | Host row 激活 | `fiberPhase: active`；`Config.listConfigs({name:'dsh-followup-prompt'})` 有 schema |
 | Client slot 注册 | `Slots.listSubTree`：`conversation.input.overlay` 中 `followup-prompt` order 100 `active` |
 | 鉴权传输 | 浏览器 cookie 调 `/api/followup-prompt/rpc`：坏请求、未知 endpoint、未知会话均返回预期结果 |
-| 真实 LLM 预测 | 第 2 回合返回 `{"suggestion":"先聊聊测试覆盖率和 CI 流程吧","turn":2}` |
+| 真实 LLM 预测 | 压缩对话方案：首轮冷启动 13,119 prompt tokens，第二轮 13,508 prompt tokens、命中 13,056（96.65%）、1.76s，返回 suggestion |
 | dismiss | dismiss 后再 wait 返回 `{suggestion:null, reason:"stale"}` |
 
 仍需在页面上人工确认：
@@ -246,14 +241,11 @@ npm run pack:dry  # 只看打包内容
 2. `captureInsertion/insertText` 的真实行为、一次撤销；
 3. ghost 在深/浅色、附件栏、多行输入、不同字号下的对齐；
 4. 切会话不串、IME 组合隐藏、断网静默、多窗口不重复计费、卸载后无残留监听器；
-5. 非 DeepSeek provider 对合成 tool-call 历史的接受度（失败则降级为「tool-call 即放弃」）；
-6. 前缀缓存 A/B（见下）。
-
-**前缀缓存 A/B**：对比三组请求的 `usage.cacheReadTokens`/`inputTokens`——全量历史 + tools + toolHistory（当前方案）、全量历史不带 tools、裁剪到最近 6 轮 + tools。若前两组差异 <5%，可考虑去掉 tools 继承、省掉 tool-rejection 路径。
+5. 非 DeepSeek provider 对压缩对话（无 tools）的接受度。
 
 ### 7.4 升级回归清单
 
-DSH 升级后核对：slot 名与 standardProps；`data-composer-input`/`-placeholder`/`-card` 是否仍在；ghost 对齐；`inputActions.captureInsertion/insertText` 是否仍在；`connection.fetch.register` 契约；`session.deriveMessages/requestHeader/toolHistory/snapshotEvents` 签名。任一项变化先降级（overlay ghost → `conversation.input.dock` 建议条 → `enabled=false`）。
+DSH 升级后核对：slot 名与 standardProps；`data-composer-input`/`-placeholder`/`-card` 是否仍在；ghost 对齐；`inputActions.captureInsertion/insertText` 是否仍在；`connection.fetch.register` 契约；`session.deriveMessages/requestHeader/snapshotEvents` 签名。任一项变化先降级（overlay ghost → `conversation.input.dock` 建议条 → `enabled=false`）。
 
 ### 7.5 发布
 
@@ -276,8 +268,8 @@ npm 在本地发布（需 `npm login`，按提示输入 2FA 验证码），先 p
 | 额外计费 | 总开关、采样、超时、路由覆盖、`maxTurns`；README 明示 |
 | Client 依赖 0.2.1 私有 DOM 结构，升级后漂移 | 常量集中、特性检测、失败静默、回归清单 |
 | `/api` exact Fetch 路由不是 stable 公开 API | `engines` 锁定 0.2.x；可随时关闭 |
-| 模型反复调用工具 | 轮次上限 + 总 deadline + 指令约束 |
-| 缓存收益未达预期 | §7.3 A/B 实测后再决定是否保留 tools 继承 |
+| 压缩对话信息量不足 | 保留双方完整可见文本（只丢弃 thinking/tool call/tool 输出）；可用 `maxTurns` 控制累积轮数 |
+| 缓存收益未达预期 | 压缩对话只追加不重写，前缀缓存逐轮累积；若 provider 缓存 TTL 太短则退化为小 prompt，成本仍然可控 |
 | 键盘桥是全局单槽，未按会话区分 | 只有可见 ghost 发布 handle；彻底解决需要 slot 帧提供会话身份 |
 | 本地密钥过滤是启发式 | 永不自动发送 + 用户可编辑 |
 

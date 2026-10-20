@@ -71,8 +71,7 @@ Semantics:
 - Global concurrency (internal `maxConcurrent`) exceeded → `reason: "busy"`.
 - Master switch off (`enabled: false`) → `reason: "disabled"` (nothing is generated or cached).
 - Model/provider failure → `reason: "error"`; abort/timeout → `reason: "aborted"` / `"timeout"`;
-  output truncated by `maxTokens` (`finish.kind === "max-tokens"`) → `reason: "max-tokens"`;
-  a model that still insists on tool calls after the internal `maxToolRejectRounds` → `reason: "tool-rejected"`.
+  output truncated by `maxTokens` (`finish.kind === "max-tokens"`) → `reason: "max-tokens"`.
 - Successful completion whose text is rejected by the local filter (empty, `NO_PREDICTION`,
   control characters, secret-like shape) → `{ suggestion: null, turn }` with **no** `reason`;
   the Host logs it as `filtered`. The Client treats every null suggestion identically.
@@ -119,12 +118,12 @@ serves it without a new model call.
 
 ## Hard invariants
 
-- The prediction request never enters the agent loop: no tools are executed, no session events are
-  appended, no compaction runs. Tool calls emitted by the model are rejected with one unified
-  `isError` tool-result per call (maximum `maxToolRejectRounds` retries, then silence).
+- The prediction request never enters the agent loop: no tools are sent or executed, no session
+  events are appended, no compaction runs. It is a standalone condensed transcript (visible text
+  only) plus a fixed system prompt and a closing user cue.
 - The accepted suggestion is only ever written as an **editable draft**; the Client must never call
   `inputActions.submit()`.
 - The Host stores predictions in process memory only (keyed by `sessionId`, latest completed
   `turn`); nothing is persisted to the session log or disk.
 - No transcript content in logs — only non-sensitive metadata (session, turn, provider/model,
-  latency, token counts, rounds, outcome).
+  latency, token counts, outcome).
