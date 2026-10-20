@@ -5,24 +5,18 @@ import assert from 'node:assert/strict'
 import { test } from 'node:test'
 
 import { apply, Config, name, inject } from '../host/index.js'
-import { CONFIG_KEYS, DEFAULTS, FIELDS, resolveConfig } from '../host/config.js'
-import { isSampledOut } from '../host/cache.js'
+import { DEFAULTS, FIELDS, resolveConfig } from '../host/config.js'
+import { MAX_CONCURRENT, PredictionCache } from '../host/cache.js'
 import { isSubagentSession, latestCompletedTurn } from '../host/session.js'
 import {
   buildPredictionPairs,
   buildRequestMessages,
   FOLLOWUP_INSTRUCTION,
+  MAX_SUGGESTION_CHARS,
   PREDICTION_CUE,
-  PREDICTION_REASONS,
   normalizeSuggestion,
 } from '../host/prediction.js'
-import {
-  DEFAULT_WAIT_MS,
-  ERROR_BAD_ENDPOINT,
-  ERROR_BAD_REQUEST,
-  MAX_WAIT_MS,
-  ROUTE,
-} from '../host/channel.js'
+import { ERROR_BAD_ENDPOINT, ERROR_BAD_REQUEST, ROUTE } from '../host/channel.js'
 
 const DEFAULT_SUGGESTION = 'Add a unit test for the guard'
 
@@ -50,12 +44,8 @@ function createSession(id, options = {}) {
     deriveMessages: () => messages,
     requestHeader: () => ({
       config: options.requestConfig ?? { provider: 'fake-provider', model: 'fake-model', temperature: 0.3 },
-      ...(options.adapterDefaults === undefined ? {} : { adapterDefaults: options.adapterDefaults }),
-      ...(options.tools === undefined
-        ? { tools: [{ name: 'fs_read', description: 'Read a file', parameters: { type: 'object' } }] }
-        : { tools: options.tools }),
+      tools: [{ name: 'fs_read', description: 'Read a file', parameters: { type: 'object' } }],
     }),
-    toolHistory: () => ({ tools: [], updates: [] }),
     snapshotEvents: () => [...events],
   }
   return { session, events }
@@ -78,17 +68,6 @@ async function* textChunks(text, usage) {
   yield { type: 'block-end', index: 0, block: { type: 'text', text } }
   if (usage !== undefined) yield { type: 'usage', usage }
   yield { type: 'finish', reason: { kind: 'stop' } }
-}
-
-async function* toolCallChunks(calls, usage) {
-  for (let index = 0; index < calls.length; index += 1) {
-    const call = calls[index]
-    yield { type: 'block-start', index, blockType: 'tool-call' }
-    yield { type: 'tool-call-delta', index, id: call.id, name: call.name, argumentsDelta: call.arguments }
-    yield { type: 'block-end', index, block: { type: 'tool-call', id: call.id, name: call.name, arguments: call.arguments } }
-  }
-  if (usage !== undefined) yield { type: 'usage', usage }
-  yield { type: 'finish', reason: { kind: 'tool-calls' } }
 }
 
 function createHarness(options = {}) {
@@ -228,14 +207,11 @@ test('entry contract: name / inject / Config / apply', () => {
   assert.equal(typeof Config, 'function', 'Config export (schemastery schema)')
   const standard = Config['~standard']
   assert(standard !== undefined && typeof standard.validate === 'function', 'Config is a standard-schema')
-  const userDefaults = Object.fromEntries(CONFIG_KEYS.map((key) => [key, DEFAULTS[key]]))
-  const validated = standard.validate(userDefaults)
+  const validated = standard.validate({ ...DEFAULTS })
   assert(validated.issues === undefined, `Config rejected the documented defaults: ${JSON.stringify(validated.issues)}`)
 })
 
-test('config: schema exposes only user fields; resolver covers every field', () => {
-  assert.deepEqual(CONFIG_KEYS, Object.keys(FIELDS).filter((key) => !FIELDS[key].internal), 'user-facing keys')
-  assert.equal(CONFIG_KEYS.length, 9, 'user-facing field count')
+test('config: the resolver covers every schema field', () => {
   const resolved = resolveConfig({})
   assert.deepEqual(Object.keys(resolved), Object.keys(FIELDS), 'resolved key set')
   assert.deepEqual({ ...resolved }, { ...DEFAULTS }, 'resolved defaults')
@@ -258,10 +234,6 @@ test('config: resolves volatile references and clamps bounds', () => {
     maxTokens: volatile(0),
     timeoutMs: volatile(99999),
     maxTurns: volatile(-4),
-    maxSuggestionChars: volatile(1.9),
-    sampleRate: volatile(5),
-    maxConcurrent: volatile(0),
-    cacheTtlMs: volatile(1),
     prompt: volatile('  Predict it.  '),
   })
   assert.equal(live.enabled, false, 'volatile enabled')
@@ -271,10 +243,6 @@ test('config: resolves volatile references and clamps bounds', () => {
   assert.equal(live.maxTokens, FIELDS.maxTokens.range[0], 'maxTokens clamped up')
   assert.equal(live.timeoutMs, FIELDS.timeoutMs.range[1], 'timeoutMs capped at 30s')
   assert.equal(live.maxTurns, 0, 'maxTurns clamped')
-  assert.equal(live.maxSuggestionChars, 1, 'maxSuggestionChars truncated')
-  assert.equal(live.sampleRate, 1, 'sampleRate capped')
-  assert.equal(live.maxConcurrent, FIELDS.maxConcurrent.range[0], 'maxConcurrent clamped up')
-  assert.equal(live.cacheTtlMs, FIELDS.cacheTtlMs.range[0], 'cacheTtlMs clamped up')
   assert.equal(live.prompt, 'Predict it.', 'prompt trimmed')
 
   const halfRoute = resolveConfig({ provider: 'only-provider' })
@@ -285,16 +253,15 @@ test('config: resolves volatile references and clamps bounds', () => {
 })
 
 test('prediction helpers: suggestion normalization and safety filters', () => {
-  const config = resolveConfig({})
-  assert.equal(normalizeSuggestion('```\nRun the tests\n```', config), 'Run the tests', 'markdown fence stripped')
-  assert.equal(normalizeSuggestion('"thanks"', config), 'thanks', 'double quotes stripped')
-  assert.equal(normalizeSuggestion('`continue`', config), 'continue', 'backticks stripped')
-  assert.equal(normalizeSuggestion('NO_PREDICTION', config), null, 'sentinel dropped')
-  assert.equal(normalizeSuggestion('   ', config), null, 'empty dropped')
-  assert.equal(normalizeSuggestion('bad\u0007bell', config), null, 'control character dropped')
-  assert.equal(normalizeSuggestion('key sk-abcdefghijklmnopqrst', config), null, 'secret-shaped token dropped')
-  const truncated = normalizeSuggestion('x'.repeat(500), config)
-  assert.equal(truncated.length, config.maxSuggestionChars, 'suggestion truncated to maxSuggestionChars')
+  assert.equal(normalizeSuggestion('```\nRun the tests\n```'), 'Run the tests', 'markdown fence stripped')
+  assert.equal(normalizeSuggestion('"thanks"'), 'thanks', 'double quotes stripped')
+  assert.equal(normalizeSuggestion('`continue`'), 'continue', 'backticks stripped')
+  assert.equal(normalizeSuggestion('NO_PREDICTION'), null, 'sentinel dropped')
+  assert.equal(normalizeSuggestion('   '), null, 'empty dropped')
+  assert.equal(normalizeSuggestion('bad\u0007bell'), null, 'control character dropped')
+  assert.equal(normalizeSuggestion('key sk-abcdefghijklmnopqrst'), null, 'secret-shaped token dropped')
+  const truncated = normalizeSuggestion('x'.repeat(500))
+  assert.equal(truncated.length, MAX_SUGGESTION_CHARS, 'suggestion truncated')
   assert(FOLLOWUP_INSTRUCTION.includes('NO_PREDICTION'), 'instruction sentinel present')
 })
 
@@ -320,12 +287,12 @@ test('prediction: the request is a condensed transcript of one pair per turn', (
   const request = buildRequestMessages(session, resolveConfig({}), 'p', 'm')
   assert(request !== null, 'condensed request built')
   assert.deepEqual(
-    request.messages.map((message) => message.role),
+    request.map((message) => message.role),
     ['user', 'assistant', 'user', 'assistant', 'user'],
     'pairs then the closing cue',
   )
-  assert.equal(request.messages[3].content[0].text, 'Done.', 'assistant side carries the reply text')
-  assert.equal(request.messages.at(-1).content[0].text, PREDICTION_CUE, 'cue closes the transcript')
+  assert.equal(request[3].content[0].text, 'Done.', 'assistant side carries the reply text')
+  assert.equal(request.at(-1).content[0].text, PREDICTION_CUE, 'cue closes the transcript')
 })
 
 test('prediction: one more turn appends one pair to the same prefix', () => {
@@ -333,7 +300,7 @@ test('prediction: one more turn appends one pair to the same prefix', () => {
     { id: `q-u${index}`, role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text: `question ${index}` }] },
     { id: `q-a${index}`, role: 'assistant', source: { kind: 'model', provider: 'p', model: 'm' }, content: [{ type: 'text', text: `answer ${index}.` }] },
   ]
-  const shape = (session) => buildRequestMessages(session, resolveConfig({}), 'p', 'm').messages
+  const shape = (session) => buildRequestMessages(session, resolveConfig({}), 'p', 'm')
     .map((message) => ({ role: message.role, text: message.content[0].text }))
   const two = shape(createSession('prefix-two', { messages: [...pair(1), ...pair(2)] }).session)
   const three = shape(createSession('prefix-three', { messages: [...pair(1), ...pair(2), ...pair(3)] }).session)
@@ -384,7 +351,7 @@ test('request: the configured prompt is sent as the system prompt', async () => 
     const { session, events } = createSession('session-system-prompt')
     harness.addSession(session)
     seedCompletedTurn(harness, session, events, 1)
-    valueOf(await wait(harness, { sessionId: 'session-system-prompt', waitMs: 2000 }))
+    valueOf(await wait(harness, { sessionId: 'session-system-prompt' }))
     const request = harness.calls[0]
     assert.equal(request.system, 'Predict the next message.', 'configured prompt becomes the system prompt')
     assert.equal(request.messages.at(-1).content[0].text, PREDICTION_CUE, 'a short cue is the final user turn')
@@ -407,7 +374,7 @@ test('prediction: long tool output never reaches the prediction request', async 
     const { session, events } = createSession('session-long-agentic', { messages })
     harness.addSession(session)
     seedCompletedTurn(harness, session, events, 1)
-    const value = valueOf(await wait(harness, { sessionId: 'session-long-agentic', waitMs: 2000 }))
+    const value = valueOf(await wait(harness, { sessionId: 'session-long-agentic' }))
     assert.equal(value.suggestion, DEFAULT_SUGGESTION, 'the prediction runs')
     const request = harness.calls[0]
     assert.equal(request.messages.length, 3, 'one pair plus the closing cue')
@@ -437,13 +404,6 @@ test('turn resolution: latest completed turn walk', async () => {
   } finally {
     await harness.disposeAll()
   }
-  assert.equal(isSampledOut('same-session', 3, 1), false, 'sampleRate 1 never samples out')
-  assert.equal(isSampledOut('same-session', 3, 0), true, 'sampleRate 0 always samples out')
-  assert.equal(
-    isSampledOut('same-session', 3, 0.5),
-    isSampledOut('same-session', 3, 0.5),
-    'sampling is deterministic per (session, turn)',
-  )
   assert.equal(
     isSubagentSession({ header: { origin: 'subagent' } }),
     true,
@@ -468,8 +428,6 @@ test('route: exact POST /api/followup-prompt/rpc registered once', async () => {
     assert.deepEqual(harness.route.methods, ['POST'], 'route methods')
     assert.equal(harness.route.requestBody, 'buffered', 'route body mode')
     assert.equal(typeof harness.route.fetch, 'function', 'route fetch handler')
-    assert.equal(DEFAULT_WAIT_MS, 12000, 'default wait budget')
-    assert.equal(MAX_WAIT_MS, 15000, 'maximum wait budget')
     const methodResponse = await harness.route.fetch(new Request(`http://127.0.0.1:57434${ROUTE}`, { method: 'GET' }))
     assert.equal(methodResponse.status, 405, 'non-POST method is rejected outside the envelope')
   } finally {
@@ -488,7 +446,7 @@ test('wait: turn/end(completed) + lazy wait makes exactly one call', async () =>
     assert.equal(harness.calls.length, 0, 'prefetch off: no model call on turn/end')
     const eventCountBefore = events.length
 
-    const first = valueOf(await wait(harness, { sessionId: 'session-lazy', waitMs: 1000 }))
+    const first = valueOf(await wait(harness, { sessionId: 'session-lazy' }))
     assert.equal(first.suggestion, DEFAULT_SUGGESTION, 'first wait returns the suggestion')
     assert.equal(first.turn, 1, 'first wait reports the turn')
     assert.equal(first.reason, undefined, 'a suggestion carries no reason')
@@ -512,7 +470,7 @@ test('wait: turn/end(completed) + lazy wait makes exactly one call', async () =>
     assert.equal(request.messages[0].role, 'user', 'the transcript starts with the human message')
     assert.equal(request.messages.length, 3, 'one condensed pair plus the closing cue')
 
-    const second = valueOf(await wait(harness, { sessionId: 'session-lazy', waitMs: 1000 }))
+    const second = valueOf(await wait(harness, { sessionId: 'session-lazy' }))
     assert.equal(second.suggestion, DEFAULT_SUGGESTION, 'cached wait returns the suggestion')
     assert.equal(second.turn, 1, 'cached wait reports the turn')
     assert.equal(harness.calls.length, 1, 'cached wait makes no second model call')
@@ -521,42 +479,39 @@ test('wait: turn/end(completed) + lazy wait makes exactly one call', async () =>
   }
 })
 
-test('request: adapter-materialized defaults are deleted then policy-applied', async () => {
-  const harness = createHarness({
-    config: { ...DEFAULTS, reasoningEffort: 'low', maxTokens: 96 },
-  })
-  try {
-    const { session, events } = createSession('session-adapter', {
-      requestConfig: {
-        provider: 'fake-provider',
-        model: 'fake-model',
-        reasoningEffort: 'high',
-        maxTokens: 4096,
-        temperature: 0.1,
-      },
-      adapterDefaults: { reasoningEffort: true, maxTokens: true },
-    })
-    harness.addSession(session)
-    seedCompletedTurn(harness, session, events, 1)
-    const value = valueOf(await wait(harness, { sessionId: 'session-adapter', waitMs: 1000 }))
-    assert.equal(value.suggestion, DEFAULT_SUGGESTION, 'suggestion produced')
-    const request = harness.calls[0]
-    assert.equal(request.reasoningEffort, 'low', 'configured reasoning effort overrides the deleted adapter default')
-    assert.equal(request.maxTokens, 96, 'configured output cap overrides the deleted adapter default')
-    assert.equal(request.temperature, 0.1, 'unflagged controls survive')
-  } finally {
-    await harness.disposeAll()
+test('request: the prediction policy replaces the inherited effort and output cap', async () => {
+  const requestConfig = {
+    provider: 'fake-provider',
+    model: 'fake-model',
+    reasoningEffort: 'max',
+    maxTokens: 4096,
+    temperature: 0.1,
+  }
+  for (const [reasoningEffort, expected] of [['low', 'low'], ['', undefined]]) {
+    const harness = createHarness({ config: { ...DEFAULTS, reasoningEffort, maxTokens: 96 } })
+    try {
+      const { session, events } = createSession('session-policy', { requestConfig })
+      harness.addSession(session)
+      seedCompletedTurn(harness, session, events, 1)
+      valueOf(await wait(harness, { sessionId: 'session-policy' }))
+      const request = harness.calls[0]
+      assert.equal(request.reasoningEffort, expected, `reasoningEffort ${JSON.stringify(reasoningEffort)} is never inherited`)
+      assert.equal(request.maxTokens, 96, 'configured output cap applied')
+      assert.equal(request.temperature, 0.1, 'other inherited controls survive')
+    } finally {
+      await harness.disposeAll()
+    }
   }
 })
 
-// ── Cache, dismiss, TTL, sampling, disabled ──────────────────────────────
+// ── Cache, dismiss, disabled ──────────────────────────────
 test('dismiss: the turn is no longer served (stale), idempotently', async () => {
   const harness = createHarness()
   try {
     const { session, events } = createSession('session-dismiss')
     harness.addSession(session)
     seedCompletedTurn(harness, session, events, 2)
-    valueOf(await wait(harness, { sessionId: 'session-dismiss', waitMs: 1000 }))
+    valueOf(await wait(harness, { sessionId: 'session-dismiss' }))
     assert.equal(harness.calls.length, 1, 'initial generation')
 
     const dismissed = valueOf(await dismiss(harness, { sessionId: 'session-dismiss', turn: 2 }))
@@ -564,7 +519,7 @@ test('dismiss: the turn is no longer served (stale), idempotently', async () => 
     valueOf(await dismiss(harness, { sessionId: 'session-dismiss', turn: 2 }))
     valueOf(await dismiss(harness, { sessionId: 'unknown-session' }))
 
-    const after = valueOf(await wait(harness, { sessionId: 'session-dismiss', waitMs: 1000 }))
+    const after = valueOf(await wait(harness, { sessionId: 'session-dismiss' }))
     assert.equal(after.suggestion, null, 'dismissed suggestion hidden')
     assert.equal(after.turn, 2, 'dismissed wait reports the turn')
     assert.equal(after.reason, 'stale', 'dismissed wait reason')
@@ -580,30 +535,15 @@ test('cache: invalidate on turn/start and disposal', async () => {
     const { session, events } = createSession('session-invalidate')
     harness.addSession(session)
     seedCompletedTurn(harness, session, events, 1)
-    valueOf(await wait(harness, { sessionId: 'session-invalidate', waitMs: 1000 }))
+    valueOf(await wait(harness, { sessionId: 'session-invalidate' }))
     appendEvent(harness, session, events, { type: 'turn/start', data: { turn: 2 } })
-    const afterStart = valueOf(await wait(harness, { sessionId: 'session-invalidate', waitMs: 200 }))
+    const afterStart = valueOf(await wait(harness, { sessionId: 'session-invalidate' }))
     assert.equal(afterStart.suggestion, null, 'entry dropped on turn/start')
     assert.equal(afterStart.reason, 'no-completed-turn', 'open turn resolves as no completed turn')
     harness.sessions.delete(session.id)
     harness.emitDisposed(session)
-    const afterDispose = valueOf(await wait(harness, { sessionId: 'session-invalidate', waitMs: 200 }))
+    const afterDispose = valueOf(await wait(harness, { sessionId: 'session-invalidate' }))
     assert.equal(afterDispose.reason, 'unknown-session', 'disposed session state removed')
-  } finally {
-    await harness.disposeAll()
-  }
-})
-
-test('cache: deterministic sampling answers sampled-out without a model call', async () => {
-  const harness = createHarness({ config: { ...DEFAULTS, sampleRate: 0 } })
-  try {
-    const { session, events } = createSession('session-sampled')
-    harness.addSession(session)
-    seedCompletedTurn(harness, session, events, 1)
-    const value = valueOf(await wait(harness, { sessionId: 'session-sampled', waitMs: 500 }))
-    assert.equal(value.suggestion, null, 'sampled-out has no suggestion')
-    assert.equal(value.reason, 'sampled-out', 'sampled-out reason')
-    assert.equal(harness.calls.length, 0, 'sampled-out makes no model call')
   } finally {
     await harness.disposeAll()
   }
@@ -615,30 +555,10 @@ test('cache: disabled switch answers without touching the model', async () => {
     const { session, events } = createSession('session-disabled')
     harness.addSession(session)
     seedCompletedTurn(harness, session, events, 1)
-    const value = valueOf(await wait(harness, { sessionId: 'session-disabled', waitMs: 200 }))
+    const value = valueOf(await wait(harness, { sessionId: 'session-disabled' }))
     assert.equal(value.suggestion, null, 'disabled has no suggestion')
     assert.equal(value.reason, 'disabled', 'disabled reason')
     assert.equal(harness.calls.length, 0, 'disabled makes no model call')
-  } finally {
-    await harness.disposeAll()
-  }
-})
-
-test('cache: TTL sweep expires entries (and aborts running work)', async () => {
-  const harness = createHarness({ config: { ...DEFAULTS, cacheTtlMs: 1000 } })
-  try {
-    const { session, events } = createSession('session-ttl')
-    harness.addSession(session)
-    seedCompletedTurn(harness, session, events, 1)
-    valueOf(await wait(harness, { sessionId: 'session-ttl', waitMs: 1000 }))
-    assert.equal(harness.calls.length, 1, 'entry populated')
-    // A second wait at a TTL-expired clock still serves the cached value...
-    const before = valueOf(await wait(harness, { sessionId: 'session-ttl', waitMs: 200 }))
-    assert.equal(before.suggestion, DEFAULT_SUGGESTION, 'cache hit before TTL')
-    // ...but a fresh wait after expiry regenerates instead of serving the old result.
-    await delay(1100)
-    valueOf(await wait(harness, { sessionId: 'session-ttl', waitMs: 1000 }))
-    assert.equal(harness.calls.length, 2, 'expired entry regenerated')
   } finally {
     await harness.disposeAll()
   }
@@ -657,9 +577,6 @@ test('wire: bad payloads return bad-request and never throw', async () => {
       { sessionId: '' },
       { sessionId: '   ' },
       { sessionId: 42 },
-      { sessionId: 'session-x', waitMs: -1 },
-      { sessionId: 'session-x', waitMs: 1.5 },
-      { sessionId: 'session-x', waitMs: 'soon' },
     ]
     for (const payload of badWaits) {
       assertFailure(await wait(harness, payload), 'followup-prompt/bad-request', `wait ${JSON.stringify(payload)}`)
@@ -698,7 +615,7 @@ test('wire: unknown endpoint returns the bad-endpoint envelope', async () => {
 test('wire: unknown session and open turn resolve without a model call', async () => {
   const harness = createHarness()
   try {
-    const unknown = valueOf(await wait(harness, { sessionId: 'missing-session', waitMs: 200 }))
+    const unknown = valueOf(await wait(harness, { sessionId: 'missing-session' }))
     assert.equal(unknown.suggestion, null, 'unknown session has no suggestion')
     assert.equal(unknown.turn, null, 'unknown session has no turn')
     assert.equal(unknown.reason, 'unknown-session', 'unknown session reason')
@@ -706,7 +623,7 @@ test('wire: unknown session and open turn resolve without a model call', async (
     const open = createSession('session-open')
     harness.addSession(open.session)
     appendEvent(harness, open.session, open.events, { type: 'turn/start', data: { turn: 4 } })
-    const noTurn = valueOf(await wait(harness, { sessionId: 'session-open', waitMs: 200 }))
+    const noTurn = valueOf(await wait(harness, { sessionId: 'session-open' }))
     assert.equal(noTurn.suggestion, null, 'open turn has no suggestion')
     assert.equal(noTurn.turn, null, 'open turn has no completed turn')
     assert.equal(noTurn.reason, 'no-completed-turn', 'open turn reason')
@@ -731,19 +648,18 @@ test('context: no request header yet answers no-route and can retry', async () =
         { id: 'r-2', role: 'assistant', source: { kind: 'model', provider: 'fake-provider', model: 'fake-model' }, content: [{ type: 'text', text: 'Hi! How can I help?' }] },
       ],
       requestHeader: () => header,
-      toolHistory: () => ({ tools: [], updates: [] }),
       snapshotEvents: () => [...events],
     }
     harness.addSession(session)
     seedCompletedTurn(harness, session, events, 1)
-    const first = valueOf(await wait(harness, { sessionId: 'session-no-route', waitMs: 500 }))
+    const first = valueOf(await wait(harness, { sessionId: 'session-no-route' }))
     assert.equal(first.suggestion, null, 'missing header: no suggestion')
-    assert.equal(first.reason, PREDICTION_REASONS.noRoute, 'missing header reason')
+    assert.equal(first.reason, 'no-route', 'missing header reason')
     assert.equal(harness.calls.length, 0, 'missing header makes no model call')
     // A later request header (e.g. the session finished restoring) makes the
     // same turn retryable: no-route is not a cached terminal result.
     header = { config: { provider: 'fake-provider', model: 'fake-model' } }
-    const retried = valueOf(await wait(harness, { sessionId: 'session-no-route', waitMs: 1000 }))
+    const retried = valueOf(await wait(harness, { sessionId: 'session-no-route' }))
     assert.equal(retried.suggestion, DEFAULT_SUGGESTION, 'no-route is retried once a route exists')
     assert.equal(harness.calls.length, 1, 'retry bills exactly one call')
   } finally {
@@ -759,7 +675,7 @@ test('policy: subagent sessions are not predicted for', async () => {
     })
     harness.addSession(session)
     seedCompletedTurn(harness, session, events, 1)
-    const value = valueOf(await wait(harness, { sessionId: 'session-subagent', waitMs: 200 }))
+    const value = valueOf(await wait(harness, { sessionId: 'session-subagent' }))
     assert.equal(value.suggestion, null, 'subagent session has no suggestion')
     assert.equal(value.reason, 'unknown-session', 'subagent session is invisible')
     assert.equal(harness.calls.length, 0, 'subagent session makes no model call')
@@ -768,7 +684,7 @@ test('policy: subagent sessions are not predicted for', async () => {
   }
 })
 
-test('timeout: a slow generation survives waitMs and serves a later poll', async () => {
+test('wait: the long poll lasts until a slow generation settles', async () => {
   let release
   const gate = new Promise((resolve) => {
     release = resolve
@@ -783,20 +699,35 @@ test('timeout: a slow generation survives waitMs and serves a later poll', async
     const { session, events } = createSession('session-slow')
     harness.addSession(session)
     seedCompletedTurn(harness, session, events, 1)
-    const timedOut = valueOf(await wait(harness, { sessionId: 'session-slow', waitMs: 50 }))
-    assert.equal(timedOut.reason, 'timeout', 'the poll times out')
-    assert.equal(harness.calls.length, 1, 'one generation started')
+    const pending = wait(harness, { sessionId: 'session-slow' })
+    await delay(50)
     release()
-    await flush()
-    await delay(20)
-    const later = valueOf(await wait(harness, {
-      sessionId: 'session-slow', waitMs: 2000,
-    }))
-    assert.equal(later.suggestion, 'Slow suggestion', 'a later poll observes the cached result')
-    assert.equal(harness.calls.length, 1, 'no second model call')
+    const value = valueOf(await pending)
+    assert.equal(value.suggestion, 'Slow suggestion', 'the poll waits for the generation')
+    assert.equal(harness.calls.length, 1, 'one model call')
   } finally {
     await harness.disposeAll()
   }
+})
+
+test('wait: a generation ignoring its deadline is cut off by the wait guard', async () => {
+  let signal
+  const cache = new PredictionCache({
+    generate: (session, turn, generationSignal) => {
+      signal = generationSignal
+      return new Promise(() => {})
+    },
+  })
+  const value = await cache.wait({ session: { id: 'hung' }, turn: 1, waitMs: 20 })
+  assert.deepEqual(value, { suggestion: null, turn: 1, reason: 'timeout' }, 'the guard answers timeout')
+  assert.equal(signal.aborted, true, 'the unobserved generation is aborted')
+  const others = Array.from({ length: MAX_CONCURRENT }, (_, index) => (
+    cache.wait({ session: { id: `other-${index}` }, turn: 1, waitMs: 20 })
+  ))
+  for (const other of await Promise.all(others)) {
+    assert.notEqual(other.reason, 'busy', 'the hung generation no longer holds a concurrency slot')
+  }
+  cache.dispose()
 })
 
 test('timeout: timeoutMs aborts a hung model call as timeout', async () => {
@@ -811,9 +742,9 @@ test('timeout: timeoutMs aborts a hung model call as timeout', async () => {
     const { session, events } = createSession('session-deadline')
     harness.addSession(session)
     seedCompletedTurn(harness, session, events, 1)
-    const value = valueOf(await wait(harness, { sessionId: 'session-deadline', waitMs: 5000 }))
+    const value = valueOf(await wait(harness, { sessionId: 'session-deadline' }))
     assert.equal(value.suggestion, null, 'no suggestion after the deadline')
-    assert.equal(value.reason, PREDICTION_REASONS.timeout, 'deadline reported as timeout, not aborted')
+    assert.equal(value.reason, 'timeout', 'deadline reported as timeout, not aborted')
   } finally {
     await harness.disposeAll()
   }
@@ -835,9 +766,9 @@ test('concurrency: concurrent waiters share one generation', async () => {
     const { session, events } = createSession('session-shared')
     harness.addSession(session)
     seedCompletedTurn(harness, session, events, 1)
-    const first = wait(harness, { sessionId: 'session-shared', waitMs: 2000 })
+    const first = wait(harness, { sessionId: 'session-shared' })
     await flush()
-    const second = wait(harness, { sessionId: 'session-shared', waitMs: 2000 })
+    const second = wait(harness, { sessionId: 'session-shared' })
     await flush()
     assert.equal(harness.calls.length, 1, 'one in-flight generation for two waiters')
     release()
@@ -850,39 +781,37 @@ test('concurrency: concurrent waiters share one generation', async () => {
   }
 })
 
-test('concurrency: maxConcurrent answers busy instead of queueing', async () => {
+test('concurrency: MAX_CONCURRENT running generations answer busy instead of queueing', async () => {
   let release
   const gate = new Promise((resolve) => {
     release = resolve
   })
   const harness = createHarness({
-    config: { ...DEFAULTS, maxConcurrent: 1 },
-    streams: (request, index) => index === 0
+    streams: (request, index) => index < MAX_CONCURRENT
       ? (async function* stream() {
         await gate
-        yield* textChunks('First session')
+        yield* textChunks('Gated session')
       })()
-      : textChunks('Second session'),
+      : textChunks('Late session'),
   })
   try {
-    const first = createSession('session-busy-1')
-    harness.addSession(first.session)
-    seedCompletedTurn(harness, first.session, first.events, 1)
-    const second = createSession('session-busy-2')
-    harness.addSession(second.session)
-    seedCompletedTurn(harness, second.session, second.events, 1)
-
-    const running = wait(harness, { sessionId: 'session-busy-1', waitMs: 2000 })
+    const ids = Array.from({ length: MAX_CONCURRENT + 1 }, (_, index) => `session-busy-${index}`)
+    for (const id of ids) {
+      const { session, events } = createSession(id)
+      harness.addSession(session)
+      seedCompletedTurn(harness, session, events, 1)
+    }
+    const running = ids.slice(0, -1).map((sessionId) => wait(harness, { sessionId }))
     await flush()
-    const busy = valueOf(await wait(harness, { sessionId: 'session-busy-2', waitMs: 200 }))
+    const busy = valueOf(await wait(harness, { sessionId: ids.at(-1) }))
     assert.equal(busy.suggestion, null, 'busy has no suggestion')
     assert.equal(busy.reason, 'busy', 'busy reason')
-    assert.equal(harness.calls.length, 1, 'busy session never dispatched')
+    assert.equal(harness.calls.length, MAX_CONCURRENT, 'busy session never dispatched')
     release()
-    assert.equal(valueOf(await running).suggestion, 'First session', 'first session completes')
-    const retried = valueOf(await wait(harness, { sessionId: 'session-busy-2', waitMs: 1000 }))
-    assert.equal(retried.suggestion, 'Second session', 'busy is not a cached terminal result')
-    assert.equal(harness.calls.length, 2, 'the busy session retried once a slot was free')
+    for (const pending of running) assert.equal(valueOf(await pending).suggestion, 'Gated session', 'running sessions complete')
+    const retried = valueOf(await wait(harness, { sessionId: ids.at(-1) }))
+    assert.equal(retried.suggestion, 'Late session', 'busy is not a cached terminal result')
+    assert.equal(harness.calls.length, MAX_CONCURRENT + 1, 'the busy session retried once a slot was free')
   } finally {
     await harness.disposeAll()
   }
@@ -909,7 +838,7 @@ test('abort: a cancelled waiter stops the unobserved generation', async () => {
     seedCompletedTurn(harness, session, events, 1)
 
     const controller = new AbortController()
-    const pending = wait(harness, { sessionId: 'session-abort', waitMs: 5000 }, controller.signal)
+    const pending = wait(harness, { sessionId: 'session-abort' }, controller.signal)
     await flush()
     assert.equal(harness.calls.length, 1, 'generation started')
     controller.abort()
@@ -918,7 +847,7 @@ test('abort: a cancelled waiter stops the unobserved generation', async () => {
     assert.equal(aborted.reason, 'aborted', 'aborted reason')
     await flush()
     await delay(20)
-    const retried = valueOf(await wait(harness, { sessionId: 'session-abort', waitMs: 1000 }))
+    const retried = valueOf(await wait(harness, { sessionId: 'session-abort' }))
     assert.equal(retried.suggestion, 'Recovered', 'a later wait can regenerate the turn')
     assert.equal(harness.calls.length, 2, 'cancelled generation was not cached')
   } finally {
@@ -938,13 +867,13 @@ test('prefetch: turn/end(completed) pre-generates exactly once', async () => {
     await flush()
     await flush()
     assert.equal(harness.calls.length, 1, 'exactly one prefetch generation')
-    const value = valueOf(await wait(harness, { sessionId: 'session-prefetch', waitMs: 1000 }))
+    const value = valueOf(await wait(harness, { sessionId: 'session-prefetch' }))
     assert.equal(value.suggestion, 'Prefetched suggestion', 'prefetched suggestion served')
     assert.equal(harness.calls.length, 1, 'wait reuses the prefetched result')
 
     appendEvent(harness, session, events, { type: 'turn/start', data: { turn: 2 } })
     await flush()
-    const openTurn = valueOf(await wait(harness, { sessionId: 'session-prefetch', waitMs: 200 }))
+    const openTurn = valueOf(await wait(harness, { sessionId: 'session-prefetch' }))
     assert.equal(openTurn.reason, 'no-completed-turn', 'a new turn obsoletes the old suggestion')
   } finally {
     await harness.disposeAll()

@@ -4,8 +4,8 @@ import { isSubagentSession, latestCompletedTurn } from './session.js'
 
 export const ROUTE = '/api/followup-prompt/rpc'
 
-export const DEFAULT_WAIT_MS = 12000
-export const MAX_WAIT_MS = 15000
+/** Headroom over `timeoutMs` before a long poll gives up on a generation ignoring its deadline. */
+export const WAIT_GRACE_MS = 2000
 
 export const ERROR_BAD_REQUEST = 'followup-prompt/bad-request'
 export const ERROR_BAD_ENDPOINT = 'followup-prompt/bad-endpoint'
@@ -29,9 +29,7 @@ function isCount(value) {
 
 function parseWaitRequest(payload) {
   if (!isPlainObject(payload) || !isSessionId(payload.sessionId)) return null
-  const { waitMs = DEFAULT_WAIT_MS } = payload
-  if (!isCount(waitMs)) return null
-  return { sessionId: payload.sessionId, waitMs: Math.min(waitMs, MAX_WAIT_MS) }
+  return { sessionId: payload.sessionId }
 }
 
 function parseDismissRequest(payload) {
@@ -53,12 +51,12 @@ async function waitForSuggestion({ ctx, cache, getConfig }, request, signal) {
   if (!config.enabled) return { suggestion: null, turn: null, reason: 'disabled' }
   const session = lookupSession(ctx, request.sessionId)
   // Subagent traffic must not bill the user or surface in the composer.
-  if (session === undefined || (config.excludeSubagents && isSubagentSession(session))) {
+  if (session === undefined || isSubagentSession(session)) {
     return { suggestion: null, turn: null, reason: 'unknown-session' }
   }
   const turn = latestCompletedTurn(session)
   if (turn === null) return { suggestion: null, turn: null, reason: 'no-completed-turn' }
-  return cache.wait({ session, turn, waitMs: request.waitMs, signal })
+  return cache.wait({ session, turn, waitMs: config.timeoutMs + WAIT_GRACE_MS, signal })
 }
 
 function dismissSuggestion({ cache }, request) {

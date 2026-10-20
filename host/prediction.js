@@ -25,13 +25,8 @@ export const FOLLOWUP_INSTRUCTION = [
 // cannot end on an assistant message / prefill).
 export const PREDICTION_CUE = 'Predict the next user message now. Reply with ONLY that message, or NO_PREDICTION.'
 
-export const PREDICTION_REASONS = Object.freeze({
-  noRoute: 'no-route',
-  error: 'error',
-  aborted: 'aborted',
-  timeout: 'timeout',
-  maxTokens: 'max-tokens',
-})
+/** Longer predictions are cut; the composer ghost shows one line anyway. */
+export const MAX_SUGGESTION_CHARS = 400
 
 // Injected user context (file notices, skills, goals) has another `source.kind`; only
 // real human messages delimit a condensed turn.
@@ -81,60 +76,53 @@ export function buildPredictionPairs(session, config) {
 }
 
 /** Condensed transcript plus the closing user cue, or null when no pair is complete. */
-export function buildRequestMessages(session, config, provider = '', model = '') {
+export function buildRequestMessages(session, config, provider, model) {
   const pairs = buildPredictionPairs(session, config)
   if (pairs.length === 0) return null
-  const messages = []
-  for (const pair of pairs) {
-    messages.push(createUserMessage({ content: [{ type: 'text', text: pair.user }], source: { kind: 'user' } }))
-    messages.push(createAssistantMessage({
-      content: [{ type: 'text', text: pair.assistant }],
-      // Synthesized history: no replay state, so no provider signatures are involved.
-      source: { provider: provider || 'prediction', model: model || 'prediction' },
-    }))
-  }
+  // Synthesized history: no replay state, so no provider signatures are involved.
+  const source = { provider, model }
+  const messages = pairs.flatMap((pair) => [
+    createUserMessage({ content: [{ type: 'text', text: pair.user }], source: { kind: 'user' } }),
+    createAssistantMessage({ content: [{ type: 'text', text: pair.assistant }], source }),
+  ])
   messages.push(createUserMessage({ content: [{ type: 'text', text: PREDICTION_CUE }], source: { kind: 'user' } }))
-  return { messages }
+  return messages
 }
 
-function buildInheritedRequest(session, config) {
-  const header = session.requestHeader?.()
-  if (header === null || typeof header !== 'object') return null
-  const inherited = header.config
+/** The session's own call config with the prediction policy applied, or null without a usable route. */
+function buildRequest(session, config) {
+  const inherited = session.requestHeader?.()?.config
   if (inherited === null || typeof inherited !== 'object') return null
-  const callConfig = { ...inherited }
-  if (header.adapterDefaults?.reasoningEffort === true) delete callConfig.reasoningEffort
-  if (header.adapterDefaults?.maxTokens === true) delete callConfig.maxTokens
-  // The empty config value means "the provider default", NOT "inherit the source
-  // request's effort"; the configured value is applied deliberately.
-  if (config.reasoningEffort === '') {
-    delete callConfig.reasoningEffort
-  } else {
-    callConfig.reasoningEffort = config.reasoningEffort
-  }
-
-  const provider = config.provider || callConfig.provider
-  const model = config.model || callConfig.model
+  const provider = config.provider || inherited.provider
+  const model = config.model || inherited.model
   if (typeof provider !== 'string' || provider.length === 0) return null
   if (typeof model !== 'string' || model.length === 0) return null
 
-  const bundle = buildRequestMessages(session, config, provider, model)
-  if (bundle === null) return null
+  const messages = buildRequestMessages(session, config, provider, model)
+  if (messages === null) return null
 
-  const options = {
-    ...callConfig,
+  // The condensed transcript is standalone: no tools, no tool history and no session
+  // system prompt. The prediction task is the system prompt.
+  const request = {
+    ...inherited,
     provider,
     model,
-    // The condensed transcript is standalone: no tools, no tool history, no session
-    // system prompt and no tool output. The prediction task is the system prompt.
     sessionId: session.id,
     maxTokens: config.maxTokens,
     system: config.prompt || FOLLOWUP_INSTRUCTION,
+    messages,
   }
-  return { options, messages: bundle.messages, provider, model }
+  // The empty config value means "the provider default", NOT "inherit the source
+  // request's effort" (an inherited `max` would spend the whole budget on reasoning).
+  if (config.reasoningEffort === '') {
+    delete request.reasoningEffort
+  } else {
+    request.reasoningEffort = config.reasoningEffort
+  }
+  return request
 }
 
-export function normalizeSuggestion(raw, config) {
+export function normalizeSuggestion(raw) {
   let text = String(raw ?? '').trim()
   text = text.replace(/^```[a-zA-Z]*\n?|```$/g, '').trim()
   if (text.length >= 2) {
@@ -149,63 +137,59 @@ export function normalizeSuggestion(raw, config) {
   if (/(sk-(?:proj-|ant-)?[A-Za-z0-9_-]{16,}|gh[posru]_[A-Za-z0-9]{20,}|AKIA[0-9A-Z]{16}|xox[baprs]-[A-Za-z0-9-]{10,}|AIza[0-9A-Za-z_-]{30,})/.test(text)) {
     return null
   }
-  return text.slice(0, config.maxSuggestionChars)
+  return text.slice(0, MAX_SUGGESTION_CHARS)
 }
 
-function logPrediction(ctx, session, turn, startedAt, result, outcome, provider, model) {
-  const usage = result.usage
-  const suggestion = result.suggestion
-  ctx.logger?.debug?.('followup-prompt: prediction %o', {
-    promptVersion: PROMPT_VERSION,
-    sessionId: String(session.id),
-    turn,
-    provider,
-    model,
-    ms: Date.now() - startedAt,
-    suggestionChars: typeof suggestion === 'string' ? suggestion.length : 0,
-    inputTokens: usage?.inputTokens,
-    cacheReadTokens: usage?.cacheReadTokens,
-    outputTokens: usage?.outputTokens,
-    outcome,
-  })
-}
-
+/** Never throws: every failure resolves to `{ suggestion: null, reason }` (reasons: docs/protocol.md). */
 export async function generatePrediction(ctx, session, turn, config, signal) {
   const startedAt = Date.now()
 
-  let built
+  let request
   try {
-    built = buildInheritedRequest(session, config)
+    request = buildRequest(session, config)
   } catch (error) {
     ctx.logger?.debug?.('followup-prompt: request assembly failed: %s', String(error?.message ?? error))
-    return { suggestion: null, reason: PREDICTION_REASONS.error }
+    return { suggestion: null, reason: 'error' }
   }
-  if (built === null) return { suggestion: null, reason: PREDICTION_REASONS.noRoute }
+  if (request === null) return { suggestion: null, reason: 'no-route' }
 
-  const timeout = AbortSignal.timeout(config.timeoutMs)
-  const deadline = AbortSignal.any([signal, timeout])
-  const stopReason = () => (timeout.aborted && !signal.aborted ? PREDICTION_REASONS.timeout : PREDICTION_REASONS.aborted)
-  const finish = (reason, usage) => {
-    logPrediction(ctx, session, turn, startedAt, { suggestion: null, usage }, reason, built.provider, built.model)
+  const assembler = new BlockAssembler()
+  // Metadata only: no transcript content is ever logged.
+  const log = (outcome, suggestion = null) => ctx.logger?.debug?.('followup-prompt: prediction %o', {
+    promptVersion: PROMPT_VERSION,
+    sessionId: String(session.id),
+    turn,
+    provider: request.provider,
+    model: request.model,
+    ms: Date.now() - startedAt,
+    suggestionChars: suggestion?.length ?? 0,
+    inputTokens: assembler.usage?.inputTokens,
+    cacheReadTokens: assembler.usage?.cacheReadTokens,
+    outputTokens: assembler.usage?.outputTokens,
+    outcome,
+  })
+  const fail = (reason) => {
+    log(reason)
     return { suggestion: null, reason }
   }
 
-  const assembler = new BlockAssembler()
+  const timeout = AbortSignal.timeout(config.timeoutMs)
+  const deadline = AbortSignal.any([signal, timeout])
+  const stopReason = () => (timeout.aborted && !signal.aborted ? 'timeout' : 'aborted')
+
   let streamError
   try {
-    const stream = ctx.llm.stream({ ...built.options, messages: built.messages, signal: deadline })
-    for await (const chunk of stream) assembler.push(chunk)
+    for await (const chunk of ctx.llm.stream({ ...request, signal: deadline })) assembler.push(chunk)
   } catch (error) {
     streamError = error
   }
-  const usage = assembler.usage
 
-  if (deadline.aborted) return finish(stopReason(), usage)
+  if (deadline.aborted) return fail(stopReason())
   if (streamError !== undefined) {
     // The LLM service turns adapter failures into terminal finish chunks, so this
     // path is a consumer/middleware failure: silent, never throw.
     ctx.logger?.debug?.('followup-prompt: stream failed: %s', String(streamError?.message ?? streamError))
-    return finish(PREDICTION_REASONS.error, usage)
+    return fail('error')
   }
 
   let blocks
@@ -214,24 +198,15 @@ export async function generatePrediction(ctx, session, turn, config, signal) {
   } catch (error) {
     // `blocks()` throws on an unknown block type left unclosed: treat as error.
     ctx.logger?.debug?.('followup-prompt: assembly failed: %s', String(error?.message ?? error))
-    return finish(PREDICTION_REASONS.error, usage)
+    return fail('error')
   }
   const terminal = assembler.finish
-  if (terminal.kind === 'aborted') return finish(stopReason(), usage)
-  if (terminal.kind === 'max-tokens') return finish(PREDICTION_REASONS.maxTokens, usage)
-  if (terminal.kind !== 'stop') return finish(PREDICTION_REASONS.error, usage)
+  if (terminal.kind === 'aborted') return fail(stopReason())
+  if (terminal.kind === 'max-tokens') return fail('max-tokens')
+  if (terminal.kind !== 'stop') return fail('error')
 
   const text = blocks.filter((block) => block.type === 'text').map((block) => block.text).join('')
-  const suggestion = normalizeSuggestion(text, config)
-  logPrediction(
-    ctx,
-    session,
-    turn,
-    startedAt,
-    { suggestion, usage },
-    suggestion === null ? 'filtered' : 'suggested',
-    built.provider,
-    built.model,
-  )
+  const suggestion = normalizeSuggestion(text)
+  log(suggestion === null ? 'filtered' : 'suggested', suggestion)
   return { suggestion }
 }

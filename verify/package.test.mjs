@@ -6,7 +6,7 @@ import { existsSync, readdirSync, readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { test } from 'node:test'
 import { fileURLToPath } from 'node:url'
-import { CONFIG_KEYS, DEFAULTS } from '../host/config.js'
+import { DEFAULTS } from '../host/config.js'
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..')
 const read = (path) => readFileSync(join(root, path), 'utf8')
@@ -68,7 +68,7 @@ test('cordis.patch.yml: one followup-prompt row restating every user field defau
     if (child[1].length <= header[1].length) break
     fields.push([child[2], parseScalar(child[3])])
   }
-  assert.deepEqual(fields.map(([key]) => key), CONFIG_KEYS)
+  assert.deepEqual(fields.map(([key]) => key), Object.keys(DEFAULTS))
   for (const [key, value] of fields) assert.equal(value, DEFAULTS[key], `patch default for ${key}`)
 })
 

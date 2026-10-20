@@ -2,10 +2,9 @@
 # package.json `dsh.client` and the `./client` export; it needs no Loader row.
 #
 # A patch config replaces the whole entry config (never deep-merged), so every
-# field of the Host schema is restated here with its default (host/config.js FIELDS;
-# internal tuning fields are not part of the schema). Users can edit
-# individual fields through Settings (volatile fields of this Loader row) or a
-# higher-priority profile patch, but then the complete config must be restated.
+# field of the Host schema is restated here with its default (host/config.js FIELDS).
+# Users can edit individual fields through Settings (volatile fields of this Loader
+# row) or a higher-priority profile patch, but then the complete config must be restated.
 - insert:
     - id: followup-prompt
       name: dsh-followup-prompt

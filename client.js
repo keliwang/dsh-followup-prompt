@@ -12,8 +12,8 @@ window.__ModuleLoader__.load({
     const SLOT_ID = 'followup-prompt'
     /** Last in the overlay's additive order (menus use 0). */
     const SLOT_ORDER = 100
-    /** Client-side safety net; the Host bounds its own long poll well below this. */
-    const REQUEST_TIMEOUT_MS = 20000
+    /** Client-side safety net; the Host ends its long poll by `timeoutMs` (max 30s) + 2s. */
+    const REQUEST_TIMEOUT_MS = 35000
     /** Safari can emit the closing keydown after compositionend; keep the gate briefly. */
     const COMPOSITION_GRACE_MS = 10
     const COMPOSER_INPUT_SELECTOR = '[data-composer-input]'

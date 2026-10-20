@@ -1,24 +1,12 @@
 // In-memory prediction cache and scheduler, one entry per session. Nothing is persisted.
 // Callers gate on `enabled` and subagent policy; the cache only schedules and stores.
+// Entries live until the session's next turn/start, its disposal, or plugin disposal.
 
-function unitHash(input) {
-  let hash = 0x811c9dc5
-  for (let index = 0; index < input.length; index += 1) {
-    hash ^= input.charCodeAt(index)
-    hash = Math.imul(hash, 0x01000193) >>> 0
-  }
-  return hash / 0x1_0000_0000
-}
-
-export function isSampledOut(sessionId, turn, sampleRate) {
-  if (sampleRate >= 1) return false
-  if (sampleRate <= 0) return true
-  return unitHash(`${sessionId}#${turn}`) >= sampleRate
-}
+/** Global cap on running generations; extra requests answer `busy` instead of queueing. */
+export const MAX_CONCURRENT = 2
 
 function waitForSettlement(promise, waitMs, signal) {
   if (signal?.aborted) return Promise.resolve('aborted')
-  if (!(waitMs > 0)) return Promise.resolve('timeout')
   return new Promise((resolve) => {
     const done = (outcome) => {
       clearTimeout(timer)
@@ -42,41 +30,36 @@ function resultOf(entry) {
 export class PredictionCache {
   #entries = new Map()
   #generate
-  #getConfig
   #disposed = false
 
-  constructor({ generate, getConfig }) {
+  /** `generate(session, turn, signal)` resolves to `{ suggestion, reason? }` and never rejects. */
+  constructor({ generate }) {
     this.#generate = generate
-    this.#getConfig = getConfig
   }
 
+  /**
+   * Resolves once this turn's generation settles. `waitMs` only guards against a
+   * generation that ignores its own deadline; the caller sets it above that deadline.
+   */
   async wait({ session, turn, waitMs, signal }) {
     if (this.#disposed) return { suggestion: null, turn, reason: 'aborted' }
-    this.sweep()
     const entry = this.#ensure(session, turn, false)
     if (entry === null) return { suggestion: null, turn, reason: 'busy' }
     if (entry.dismissed || entry.state === 'done') return resultOf(entry)
-    if (signal?.aborted) return { suggestion: null, turn, reason: 'aborted' }
 
     entry.waiters += 1
-    let outcome = 'aborted'
     try {
-      outcome = await waitForSettlement(entry.promise, waitMs, signal)
+      const outcome = await waitForSettlement(entry.promise, waitMs, signal)
       if (entry.dismissed || entry.state === 'done') return resultOf(entry)
-      return { suggestion: null, turn, reason: outcome === 'timeout' ? 'timeout' : 'aborted' }
+      return { suggestion: null, turn, reason: outcome }
     } finally {
       entry.waiters -= 1
-      // Only explicit caller cancellation releases the work: a plain waitMs
-      // timeout ends this poll, but the prediction may still settle into the
-      // cache for a later wait (the client can re-poll; a reopened session can
-      // catch up). Aborting here would silently discard slow predictions.
-      if (outcome !== 'timeout' || signal?.aborted) this.#abortIfUnobserved(entry)
+      this.#releaseIfUnobserved(entry)
     }
   }
 
   prefetch(session, turn) {
     if (this.#disposed) return
-    this.sweep()
     this.#ensure(session, turn, true)
   }
 
@@ -95,16 +78,6 @@ export class PredictionCache {
     this.#cancel(entry, 'invalidate')
   }
 
-  sweep() {
-    const now = Date.now()
-    const ttl = this.#getConfig().cacheTtlMs
-    for (const [sessionId, entry] of this.#entries) {
-      if (now - entry.at < ttl) continue
-      this.#entries.delete(sessionId)
-      this.#cancel(entry, 'ttl')
-    }
-  }
-
   dispose() {
     this.#disposed = true
     for (const entry of this.#entries.values()) this.#cancel(entry, 'dispose')
@@ -116,18 +89,7 @@ export class PredictionCache {
     const existing = this.#entries.get(sessionId)
     if (existing?.turn === turn) return existing
     if (existing !== undefined) this.invalidate(sessionId)
-    return this.#start(session, sessionId, turn, prefetch)
-  }
-
-  #start(session, sessionId, turn, prefetch) {
-    const config = this.#getConfig()
-    const base = { sessionId, turn, suggestion: null, reason: undefined, dismissed: false, at: Date.now() }
-    if (isSampledOut(sessionId, turn, config.sampleRate)) {
-      const entry = { ...base, state: 'done', reason: 'sampled-out' }
-      this.#entries.set(sessionId, entry)
-      return entry
-    }
-    if (this.#runningCount() >= config.maxConcurrent) return null
+    if (this.#runningCount() >= MAX_CONCURRENT) return null
 
     const controller = new AbortController()
     let resolve
@@ -135,18 +97,21 @@ export class PredictionCache {
       resolve = settle
     })
     const entry = {
-      ...base,
+      sessionId,
+      turn,
       state: 'running',
+      suggestion: null,
+      reason: undefined,
+      dismissed: false,
       controller,
       promise,
       resolve,
       waiters: 0,
       prefetch,
-      abortCause: undefined,
     }
     this.#entries.set(sessionId, entry)
     Promise.resolve()
-      .then(() => this.#generate(session, turn, controller.signal, config))
+      .then(() => this.#generate(session, turn, controller.signal))
       .catch(() => ({ suggestion: null, reason: 'error' }))
       .then((result) => this.#settle(entry, result))
     return entry
@@ -156,32 +121,36 @@ export class PredictionCache {
     // A cancelled entry (invalidate/dismiss/dispose) is already settled.
     if (entry.state !== 'running') return
     entry.state = 'done'
-    entry.at = Date.now()
     entry.suggestion = result.suggestion ?? null
     entry.reason = entry.suggestion === null ? result.reason : undefined
-    // Two null outcomes must not be cached: an unobserved generation the last
-    // waiter cancelled, and `no-route` (the session had no usable request
-    // header yet, so no model call was billed and a later wait may succeed).
-    // Every other terminal null is cached for the turn to avoid repeat billing.
-    const transient = entry.suggestion === null && (entry.abortCause === 'waiters' || result.reason === 'no-route')
-    if (transient && this.#entries.get(entry.sessionId) === entry) this.#entries.delete(entry.sessionId)
+    // `no-route` is not cached: the session had no usable request header yet, so
+    // nothing was billed and a later wait may succeed. Every other terminal result,
+    // null included, is cached for the turn to avoid repeat billing.
+    if (result.reason === 'no-route') this.#forget(entry)
     entry.resolve()
   }
 
   #cancel(entry, cause) {
     if (entry.state !== 'running') return
-    entry.abortCause = cause
     entry.state = 'done'
-    entry.at = Date.now()
     entry.reason = 'aborted'
     entry.controller.abort(new Error(`followup-prompt: ${cause}`))
     entry.resolve()
   }
 
-  #abortIfUnobserved(entry) {
+  /**
+   * The last waiter leaving stops a generation nobody else will read (prefetch excepted)
+   * and forgets it, so a later wait regenerates instead of reading a cancelled result.
+   * Settling it here also frees its concurrency slot even if the provider ignores abort.
+   */
+  #releaseIfUnobserved(entry) {
     if (entry.state !== 'running' || entry.prefetch || entry.dismissed || entry.waiters > 0) return
-    entry.abortCause = 'waiters'
-    entry.controller.abort(new Error('followup-prompt: no waiter'))
+    this.#forget(entry)
+    this.#cancel(entry, 'no waiter')
+  }
+
+  #forget(entry) {
+    if (this.#entries.get(entry.sessionId) === entry) this.#entries.delete(entry.sessionId)
   }
 
   #runningCount() {

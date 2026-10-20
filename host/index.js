@@ -17,8 +17,7 @@ export const inject = ['connection', 'llm', 'sessions']
 export function apply(ctx, rawConfig) {
   const getConfig = () => resolveConfig(rawConfig)
   const cache = new PredictionCache({
-    getConfig,
-    generate: (session, turn, signal, config) => generatePrediction(ctx, session, turn, config, signal),
+    generate: (session, turn, signal) => generatePrediction(ctx, session, turn, getConfig(), signal),
   })
 
   ctx.effect(() => () => cache.dispose(), 'followup-prompt: cache')
@@ -38,7 +37,7 @@ export function apply(ctx, rawConfig) {
     cache.invalidate(session.id)
     const config = getConfig()
     if (!config.enabled || !config.prefetchOnTurnEnd) return
-    if (config.excludeSubagents && isSubagentSession(session)) return
+    if (isSubagentSession(session)) return
     cache.prefetch(session, turn)
   }
 
