@@ -37,6 +37,7 @@
     "icon.svg",
     "docs/protocol.md",
     "README.md",
+    "README.zh.md",
     "LICENSE"
   ],
   "scripts": {

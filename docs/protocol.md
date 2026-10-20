@@ -1,129 +1,102 @@
-# Followup Prompt — wire protocol (Host ↔ Client)
+# Followup Prompt — wire protocol
 
-The shared contract between the Host half (`host/channel.js`, `host/cache.js`) and the browser half
-(`client.js`). Change both halves together. Design rationale: [`design.md`](design.md).
+The contract between the Host half (`host/`) and the browser half (`client.js`). Both halves ship in
+the same package and are always deployed together, so the protocol is not versioned: change both
+sides in the same commit. Implementation and rationale live in [`design.md`](design.md).
 
 ## Transport
 
-- Browser → Host: same-origin `POST /api/followup-prompt/rpc`, an **exact Fetch route** registered by
-  the Host half with `ctx.connection.fetch.register({ path, methods: ['POST'], requestBody: 'buffered', fetch })`
-  inside `ctx.effect(...)`. The client uses `fetch('api/followup-prompt/rpc', …)` (relative URL).
-- Why not the generic Connection RPC channel: on the live 0.2.1-rc.2 Harness, activating a profile
-  bundle that calls `ctx.connection.rpc.handle('/followup-prompt', handler)` fails with
-  `cannot get property "webServer" without inject` — the RPC registrar captures the Connection
-  service's own context (which injects only `credentials`) and then calls `owner.webServer.register`,
-  so the caller's `webServer` injection is never consulted. No in-repo plugin uses `rpc.handle`;
-  in-repo plugins and the installed third-party `ds-bot` bundle all use exact Fetch routes. This is
-  also why the Host half injects `['connection','llm','sessions']` and no `webServer`.
-- The route lives under `/api`, so it inherits the same Host/Origin trust fence, browser-cookie
-  authentication, body limit, and request cancellation as the rest of the DSH API. Only owner
-  Peers reach the route.
-- Request body (JSON, POST):
+| | |
+|---|---|
+| Route | `POST /api/followup-prompt/rpc`, an exact Fetch route registered by the Host through `ctx.connection.fetch.register` |
+| Client URL | `api/followup-prompt/rpc` (relative, so it resolves under any mount prefix) |
+| Auth | Inherited from `/api`: Host/Origin check, browser-cookie authentication, body limit. Only owner Peers reach the route. |
+| Request | JSON body `{ "endpoint": string, "payload": object }` |
+| Response | Always **HTTP 200** with a JSON envelope: `{ "ok": true, "value": … }` or `{ "ok": false, "error": { "code", "message", "details" } }`. A non-POST method gets a plain `405`. |
+| Cancellation | Aborting the HTTP request aborts `request.signal`, which the Host treats as the caller leaving. |
 
-  ```jsonc
-  { "endpoint": "suggestions/wait", "payload": { /* endpoint payload */ } }
-  ```
+The Host validates every field and never throws out of the handler; an unexpected exception
+becomes `followup-prompt/internal`.
 
-- Response: **HTTP 200** with a JSON envelope, either `{ "ok": true, "value": … }` or
-  `{ "ok": false, "error": { "code", "message", "details" } }`. The Client treats any non-200,
-  network/abort, malformed-JSON, or `ok:false` result as "no suggestion" (silent).
-- The Host validates every field at this wire boundary and never throws from the route handler
-  (unexpected exceptions map to `followup-prompt/internal`). `request.signal` carries the caller's
-  cancellation into the long poll.
+## `suggestions/wait`
 
-## Endpoints
-
-### `suggestions/wait`
-
-Long-poll for the prediction of the latest completed turn.
-
-Request:
+Long-polls for the prediction of the session's latest completed turn. The Client never names a
+turn: the Host always answers for its own latest completed one.
 
 ```jsonc
-{
-  "sessionId": "…",   // required, non-empty string
-  "waitMs": 12000     // optional, 0..15000; default 12000, Host-capped at 15000
-}
-```
+// payload
+{ "sessionId": "…" }               // non-empty string
 
-Success value:
-
-```jsonc
+// value
 {
   "suggestion": "帮我补一个单元测试", // string | null
-  "turn": 7,                        // number | null — the completed turn the result belongs to
-  "reason": "timeout"               // optional, present when suggestion is null
+  "turn": 7,                        // integer | null: the completed turn the answer belongs to
+  "reason": "timeout"               // only present when suggestion is null (see below)
 }
 ```
 
-Semantics:
+**Timing.** The poll stays open until that turn's generation settles. A generation is bounded by
+the `timeoutMs` setting (at most 30 s); as a guard against a provider that ignores cancellation,
+the Host also ends the poll at `timeoutMs + 2 s`. So a poll never lasts longer than 32 s.
 
-- The Host always predicts for its own latest completed turn; the Client does not name one.
-- No completed turn yet / unknown session / subagent session → `{ suggestion: null, turn: null,
-  reason: "unknown-session" | "no-completed-turn" }`.
-- Cached terminal result for `(sessionId, turn)` returns immediately (a `null` result is cached too,
-  so repeated polling does not re-bill).
-- A running generation is shared by all waiters; the Client aborting its request only removes a
-  waiter. The Host cancels work when the last waiter leaves (unless `prefetchOnTurnEnd` started it).
-- `waitMs` expiry → `{ suggestion: null, turn, reason: "timeout" }` (generation may continue in the
-  background; a later wait can still observe it).
-- Deterministic sampling (internal `sampleRate < 1`) → `reason: "sampled-out"`, cached for the turn.
-- Global concurrency (internal `maxConcurrent`) exceeded → `reason: "busy"`.
-- Master switch off (`enabled: false`) → `reason: "disabled"` (nothing is generated or cached).
-- Model/provider failure → `reason: "error"`; abort/timeout → `reason: "aborted"` / `"timeout"`;
-  output truncated by `maxTokens` (`finish.kind === "max-tokens"`) → `reason: "max-tokens"`.
-- Successful completion whose text is rejected by the local filter (empty, `NO_PREDICTION`,
-  control characters, secret-like shape) → `{ suggestion: null, turn }` with **no** `reason`;
-  the Host logs it as `filtered`. The Client treats every null suggestion identically.
+**Sharing and billing.** Concurrent polls for the same turn share one generation. A poll that
+leaves (client abort) only removes itself; when the last one leaves, the Host cancels the
+generation, unless it was started by `prefetchOnTurnEnd`. Terminal results are cached per turn,
+so polling again does not bill again.
 
-### `suggestions/dismiss`
+**Null answers.** Every `suggestion: null` means "show nothing"; the Client must not branch on
+`reason`, which exists for logs and tests.
 
-Request: `{ "sessionId": "…", "turn": 7 /* optional integer >= 0, the turn from the wait result */ }`
+| `reason` | Meaning | Cached for the turn |
+|---|---|---|
+| `disabled` | `enabled` is false; nothing is generated | — |
+| `unknown-session` | No such session, or a subagent session | — |
+| `no-completed-turn` | The session's latest turn is open or did not complete; `turn` is null | — |
+| `busy` | The Host is already running its maximum number of generations | no |
+| `no-route` | The session has no usable provider/model or no complete user/assistant pair yet; nothing was billed | no |
+| `aborted` | The generation was cancelled (last poll left, new turn, plugin unload) | no |
+| `timeout` | The generation hit `timeoutMs`, or the poll hit the `+2 s` guard | yes / no |
+| `max-tokens` | Output was truncated by `maxTokens` | yes |
+| `error` | Provider or stream failure | yes |
+| `stale` | The turn's suggestion was dismissed | yes |
+| *(absent)* | The model answered but the local filter rejected it (empty, `NO_PREDICTION`, control characters, secret-like text) | yes |
 
-Success value: `{ "ok": true }`
-
-Marks the suggestion dismissed for the turn (accepted or explicitly closed); subsequent `wait`
-calls return `{ suggestion: null, turn, reason: "stale" }`. Dismiss is idempotent and is
-fire-and-forget from the Client's perspective.
-
-## Error envelope
-
-Business failures use the JSON result envelope (still HTTP 200):
+## `suggestions/dismiss`
 
 ```jsonc
-{ "ok": false, "error": { "code": "followup-prompt/bad-request", "message": "…", "details": {} } }
+// payload
+{ "sessionId": "…", "turn": 7 }   // turn: optional integer >= 0, from the wait value
+
+// value
+{ "ok": true }
 ```
 
-Codes: `followup-prompt/bad-request`, `followup-prompt/bad-endpoint`, `followup-prompt/internal`.
-The Client MUST treat `ok: false` exactly like a transport failure: silent, no toast, no retry storm.
+Marks the turn's suggestion as used (accepted or closed) and cancels its generation if still
+running; later polls for that turn answer `stale`. Without `turn` it applies to whatever turn the
+Host holds. Idempotent; unknown sessions and mismatched turns are ignored.
 
-## Client state machine (summary)
+## Errors
 
-```
-idle
-  ──(running true→false && draft === '' && attachmentIds.length === 0
-     && input.phase === 'plain' && !blank && !awaitingFirstTurn
-     && suggestion not yet requested for this session/turn)
-  ──> requesting: abort previous request, call suggestions/wait
-requesting ──(suggestion !== null && conditions still hold)──> shown
-requesting ──(null / reason / ok:false / abort / timeout)────> idle (silent)
-shown ──(draft !== '' || running || phase !== 'plain' || session switch || unmount)──> hidden (abort)
-hidden ──(conditions hold again, same session and turn)──> shown from the local cache (no RPC)
-shown ──(Tab accept)──> accepted: write draft via inputActions, call suggestions/dismiss, clear
-shown ──(close / Esc)────────> hidden: call suggestions/dismiss, clear
-```
+| `error.code` | When |
+|---|---|
+| `followup-prompt/bad-request` | Body is not a JSON object, `endpoint` is not a non-empty string, or the payload is invalid |
+| `followup-prompt/bad-endpoint` | Unknown `endpoint` |
+| `followup-prompt/internal` | Unexpected Host exception |
 
-Catch-up: mounting into an already-idle, completed session issues one `suggestions/wait`; Host cache
-serves it without a new model call.
+## Obligations
 
-## Hard invariants
+**Client**
 
-- The prediction request never enters the agent loop: no tools are sent or executed, no session
-  events are appended, no compaction runs. It is a standalone condensed transcript (visible text
-  only) plus a fixed system prompt and a closing user cue.
-- The accepted suggestion is only ever written as an **editable draft**; the Client must never call
-  `inputActions.submit()`.
-- The Host stores predictions in process memory only (keyed by `sessionId`, latest completed
-  `turn`); nothing is persisted to the session log or disk.
-- No transcript content in logs — only non-sensitive metadata (session, turn, provider/model,
-  latency, token counts, outcome).
+- Treat every failure — network error, abort, non-200, malformed JSON, `ok: false`, null
+  suggestion — as "nothing to show": no toast, no retry loop.
+- Keep its own request timeout above the 32 s poll ceiling (it uses 35 s).
+- Write an accepted suggestion only as an editable draft; never call `inputActions.submit()`.
+- Call `suggestions/dismiss` after accept or close.
+
+**Host**
+
+- A prediction never enters the agent loop: no tools are sent or executed, no session events are
+  appended, no compaction runs.
+- Predictions live in process memory only, keyed by session and latest completed turn.
+- Logs carry metadata only (session, turn, provider/model, latency, token counts, outcome), never
+  transcript or suggestion text.
