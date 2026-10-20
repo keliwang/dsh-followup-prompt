@@ -9,12 +9,10 @@ import { isSampledOut } from '../host/cache.js'
 import { isSubagentSession, latestCompletedTurn } from '../host/session.js'
 import {
   buildRequestMessages,
-  estimateMessageChars,
   FOLLOWUP_INSTRUCTION,
   PREDICTION_REASONS,
   TOOL_REJECTION_TEXT,
   normalizeSuggestion,
-  trimRequestMessages,
 } from '../host/prediction.js'
 import {
   DEFAULT_WAIT_MS,
@@ -259,7 +257,7 @@ test('entry contract: name / inject / Config / apply', () => {
 
 test('config: schema exposes only user fields; resolver covers every field', () => {
   assert.deepEqual(CONFIG_KEYS, Object.keys(FIELDS).filter((key) => !FIELDS[key].internal), 'user-facing keys')
-  assert.equal(CONFIG_KEYS.length, 10, 'user-facing field count')
+  assert.equal(CONFIG_KEYS.length, 9, 'user-facing field count')
   const resolved = resolveConfig({})
   assert.deepEqual(Object.keys(resolved), Object.keys(FIELDS), 'resolved key set')
   assert.deepEqual({ ...resolved }, { ...DEFAULTS }, 'resolved defaults')
@@ -279,7 +277,6 @@ test('config: resolves volatile references and clamps bounds', () => {
     maxTokens: volatile(0),
     timeoutMs: volatile(99999),
     maxTurns: volatile(-4),
-    maxInputChars: volatile(-10),
     maxToolRejectRounds: volatile(9),
     maxSuggestionChars: volatile(1.9),
     sampleRate: volatile(5),
@@ -294,7 +291,6 @@ test('config: resolves volatile references and clamps bounds', () => {
   assert.equal(live.maxTokens, FIELDS.maxTokens.range[0], 'maxTokens clamped up')
   assert.equal(live.timeoutMs, FIELDS.timeoutMs.range[1], 'timeoutMs capped at 30s')
   assert.equal(live.maxTurns, 0, 'maxTurns clamped')
-  assert.equal(live.maxInputChars, 0, 'maxInputChars clamped')
   assert.equal(live.maxToolRejectRounds, FIELDS.maxToolRejectRounds.range[1], 'maxToolRejectRounds capped')
   assert.equal(live.maxSuggestionChars, 1, 'maxSuggestionChars truncated')
   assert.equal(live.sampleRate, 1, 'sampleRate capped')
@@ -324,70 +320,77 @@ test('prediction helpers: suggestion normalization and safety filters', () => {
   assert(TOOL_REJECTION_TEXT.includes('Do not call any tool'), 'rejection text present')
 })
 
-test('context: full history is kept when within budget (prefix reuse)', async () => {
+test('context: full history is kept by default (prefix reuse)', () => {
   const { session } = createSession('context-full', { messages: contextMessages() })
-  const messages = buildRequestMessages(session, resolveConfig({ maxInputChars: 20000 }))?.messages
-  assert(messages !== undefined, 'full history fits the default budget')
+  const messages = buildRequestMessages(session, resolveConfig({}))?.messages
+  assert(messages !== undefined, 'full history kept')
   assert.equal(messages.length, 8, 'seven history messages plus one tail instruction')
   assert.equal(messages[0].role, 'system', 'system head preserved')
   assert.equal(messages[1].id, 'ctx-u1', 'oldest human turn preserved')
   assert.equal(messages.at(-1).role, 'user', 'tail instruction appended last')
   assert.equal(messages.at(-1).content[0].text, FOLLOWUP_INSTRUCTION, 'tail instruction text')
-  const custom = buildRequestMessages(session, resolveConfig({ maxInputChars: 20000, prompt: '  Predict the next message.  ' }))?.messages
+  const custom = buildRequestMessages(session, resolveConfig({ prompt: '  Predict the next message.  ' }))?.messages
   assert(custom !== undefined, 'custom prompt builds a request')
   assert.equal(custom.at(-1).content[0].text, 'Predict the next message.', 'configured prompt overrides the built-in one')
 })
 
-test('context: over-budget trimming cuts only at a human user boundary', async () => {
-  const { session } = createSession('context-trim', { messages: contextMessages() })
-  const config = resolveConfig({ maxInputChars: 900 })
-  const bundle = buildRequestMessages(session, config)
-  assert(bundle !== null, 'a fitting suffix exists')
-  assert.equal(bundle.degraded, true, 'trimming is reported as degraded')
-  const history = bundle.messages.slice(0, -1)
-  assert.equal(history[0].role, 'system', 'head preserved after trim')
-  assert.equal(history[1].id, 'ctx-u2', 'suffix starts at the latest human user boundary')
-  assert.equal(history[1].role, 'user', 'trim never starts on a tool result')
-  const usedChars = history.reduce((sum, message) => sum + estimateMessageChars(message), 0)
-    + FOLLOWUP_INSTRUCTION.length
-  assert(usedChars <= 900, `trimmed request stays within budget (used ${usedChars})`)
-
-  const tooSmall = buildRequestMessages(session, resolveConfig({ maxInputChars: 50 }))
-  assert.equal(tooSmall, null, 'no safe cut point fits the budget: predict nothing')
-})
-
-test('context: turn cap and stripMedia apply in the degraded path', async () => {
+test('context: maxTurns trims only at a human user boundary, and stripMedia applies there', () => {
   const { session } = createSession('context-turns', { messages: contextMessages() })
-  const capped = buildRequestMessages(session, resolveConfig({ maxTurns: 1, maxInputChars: 0 }))?.messages
-  assert(capped !== undefined, 'maxTurns alone triggers the degraded path')
+  const capped = buildRequestMessages(session, resolveConfig({ maxTurns: 1 }))?.messages
+  assert(capped !== undefined, 'maxTurns triggers the trimmed path')
   assert.equal(capped.length, 4, 'system head + last human turn + assistant + instruction')
   assert.equal(capped[1].id, 'ctx-u2', 'only the most recent human turn kept')
+  assert.equal(capped[1].role, 'user', 'trim never starts on a tool result')
 
   const { session: mediaSession } = createSession('context-media', {
     messages: contextMessages({ image: true }),
   })
-  const stripped = buildRequestMessages(mediaSession, resolveConfig({ maxInputChars: 1100, stripMedia: true }))?.messages
-  const preserved = buildRequestMessages(mediaSession, resolveConfig({ maxInputChars: 1100, stripMedia: false }))?.messages
+  const stripped = buildRequestMessages(mediaSession, resolveConfig({ maxTurns: 1, stripMedia: true }))?.messages
+  const preserved = buildRequestMessages(mediaSession, resolveConfig({ maxTurns: 1, stripMedia: false }))?.messages
   assert(stripped !== undefined && preserved !== undefined, 'media history trims')
+  assert.equal(stripped[0].role, 'system', 'head preserved after trim')
   assert.equal(stripped[1].content[0].type, 'text', 'degraded + stripMedia projects media to text')
   assert(stripped[1].content[0].text.includes('image omitted'), 'media placeholder text')
   assert.equal(preserved[1].content[0].type, 'image', 'default path keeps media blocks intact')
 })
 
-test('context: a history without a human boundary is never split', async () => {
+test('context: a history without a human boundary is never split', () => {
   const { session } = createSession('context-no-human', {
     messages: [
       { id: 'nh-s', role: 'system', source: { kind: 'system-prompt' }, content: [{ type: 'text', text: 'sys' }] },
       { id: 'nh-a', role: 'assistant', source: { kind: 'model', provider: 'p', model: 'm' }, content: [{ type: 'text', text: 'answer' }] },
     ],
   })
-  assert.equal(buildRequestMessages(session, resolveConfig({ maxInputChars: 20 })), null, 'over budget without a safe cut: null')
-  const full = buildRequestMessages(session, resolveConfig({ maxInputChars: 0 }))?.messages
-  assert(full?.length === 3, 'within budget: full history kept')
-  const trimmed = trimRequestMessages(contextMessages(), resolveConfig({ maxInputChars: 600 }), 221)
-  assert(trimmed !== null && trimmed.trimmed === true, 'trim status reported')
-  assert.equal(trimmed.messages[0].role, 'system', 'head preserved by trimRequestMessages')
-  assert.equal(trimmed.messages[1].role, 'user', 'suffix begins at a human message')
+  const full = buildRequestMessages(session, resolveConfig({ maxTurns: 1 }))
+  assert(full !== null, 'without a human boundary the full history is kept')
+  assert.equal(full.degraded, false, 'nothing was cut')
+  assert.equal(full.messages.length, 3, 'full history plus the tail instruction')
+})
+
+test('prediction: a long agentic turn still predicts with the full history', async () => {
+  const filler = 'y'.repeat(30000)
+  const messages = [
+    { id: 'l-s', role: 'system', source: { kind: 'system-prompt' }, content: [{ type: 'text', text: 'System prompt' }] },
+    { id: 'l-u1', role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text: 'Do the thing' }] },
+    { id: 'l-a1', role: 'assistant', source: { kind: 'model', provider: 'p', model: 'm' }, content: [{ type: 'tool-call', id: 'c9', name: 'bash', arguments: '{"cmd":"x"}' }] },
+    { id: 'l-t1', role: 'tool', source: { kind: 'tool', callId: 'c9' }, toolCallId: 'c9', content: [{ type: 'text', text: filler }] },
+    { id: 'l-a2', role: 'assistant', source: { kind: 'model', provider: 'p', model: 'm' }, content: [{ type: 'text', text: 'Final answer' }] },
+  ]
+  const harness = createHarness()
+  try {
+    const { session, events } = createSession('session-long-agentic', { messages })
+    harness.addSession(session)
+    seedCompletedTurn(harness, session, events, 1)
+    const value = valueOf(await wait(harness, { sessionId: 'session-long-agentic', waitMs: 2000 }))
+    assert.equal(value.suggestion, DEFAULT_SUGGESTION, 'the prediction runs instead of answering no-route')
+    assert.equal(harness.calls.length, 1, 'the model is called once')
+    const request = harness.calls[0]
+    assert.equal(request.messages.length, messages.length + 1, 'the full history plus the tail instruction was sent')
+    assert.equal(request.messages.at(-1).content[0].text, FOLLOWUP_INSTRUCTION, 'tail instruction appended')
+    assert.equal(request.messages[3].content[0].text.length, filler.length, 'the large tool output is sent untrimmed')
+  } finally {
+    await harness.disposeAll()
+  }
 })
 
 test('turn resolution: latest completed turn walk', async () => {

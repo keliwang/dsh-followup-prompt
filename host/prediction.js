@@ -19,9 +19,6 @@ export const TOOL_REJECTION_TEXT = [
   'Do not call any tool. Reply with ONLY the predicted next user message as plain text.',
 ].join(' ')
 
-const MESSAGE_OVERHEAD_CHARS = 12
-const MEDIA_PLACEHOLDER_CHARS = 200
-
 export const PREDICTION_REASONS = Object.freeze({
   noRoute: 'no-route',
   error: 'error',
@@ -30,31 +27,6 @@ export const PREDICTION_REASONS = Object.freeze({
   toolRejected: 'tool-rejected',
   maxTokens: 'max-tokens',
 })
-
-export function estimateMessageChars(message) {
-  let total = MESSAGE_OVERHEAD_CHARS
-  const content = Array.isArray(message?.content) ? message.content : []
-  for (const block of content) {
-    if (block === null || typeof block !== 'object') continue
-    switch (block.type) {
-      case 'text':
-      case 'reasoning':
-        total += String(block.text ?? '').length
-        break
-      case 'tool-call':
-        total += String(block.name ?? '').length + String(block.arguments ?? '').length
-        break
-      case 'image':
-      case 'file':
-        total += MEDIA_PLACEHOLDER_CHARS
-        break
-      default:
-        total += 40
-        break
-    }
-  }
-  return total
-}
 
 function isHeadMessage(message) {
   return message?.role === 'system' || message?.role === 'developer'
@@ -79,73 +51,37 @@ function stripMediaFromMessage(message) {
   return { ...message, content: projected }
 }
 
-export function trimRequestMessages(messages, config, instructionChars = 0) {
-  if (!Array.isArray(messages) || messages.length === 0) return null
-  const { maxInputChars, maxTurns } = config
-  const budgetActive = maxInputChars > 0
-  const turnsActive = maxTurns > 0
-  if (!budgetActive && !turnsActive) return { messages, trimmed: false }
-
+/**
+ * Keep the head plus the last `maxTurns` human turns; returns `messages` itself
+ * when nothing is cut. Without `maxTurns` the full history is sent so it matches
+ * the parent request prefix (provider prefix-cache reuse).
+ */
+export function trimToRecentTurns(messages, maxTurns) {
+  if (!(maxTurns > 0)) return messages
   let headEnd = 0
   while (headEnd < messages.length && isHeadMessage(messages[headEnd])) headEnd += 1
-  const head = messages.slice(0, headEnd)
-  const body = messages.slice(headEnd)
-
   const humanIndices = []
-  for (let index = 0; index < body.length; index += 1) {
-    if (isHumanUserMessage(body[index])) humanIndices.push(index)
+  for (let index = headEnd; index < messages.length; index += 1) {
+    if (isHumanUserMessage(messages[index])) humanIndices.push(index)
   }
-
-  const headChars = head.reduce((sum, message) => sum + estimateMessageChars(message), 0)
-  const bodyChars = body.reduce((sum, message) => sum + estimateMessageChars(message), 0)
-  const needsBudget = budgetActive && headChars + bodyChars + instructionChars > maxInputChars
-  const needsTurns = turnsActive && humanIndices.length > maxTurns
-  if (!needsBudget && !needsTurns) return { messages, trimmed: false }
-  if (humanIndices.length === 0) {
-    // No human boundary means no safe cut point: abandon instead of sending an
-    // orphaned tool call/result pair.
-    return needsBudget ? null : { messages, trimmed: false }
-  }
-
-  let start = needsTurns ? humanIndices[humanIndices.length - maxTurns] : 0
-
-  if (needsBudget) {
-    const suffixChars = new Array(body.length + 1).fill(0)
-    for (let index = body.length - 1; index >= 0; index -= 1) {
-      suffixChars[index] = suffixChars[index + 1] + estimateMessageChars(body[index])
-    }
-    const limit = maxInputChars - instructionChars
-    let budgetStart = null
-    for (const index of humanIndices) {
-      if (headChars + suffixChars[index] <= limit) {
-        budgetStart = index
-        break
-      }
-    }
-    if (budgetStart === null) return null
-    start = Math.max(start, budgetStart)
-  }
-
-  if (start === 0) return { messages, trimmed: false }
-  const kept = [...head, ...body.slice(start)]
-  if (!isHumanUserMessage(kept[head.length])) return null
-  return { messages: kept, trimmed: true }
+  // Cutting only at a human message never orphans a tool call/result pair.
+  if (humanIndices.length <= maxTurns) return messages
+  return [...messages.slice(0, headEnd), ...messages.slice(humanIndices.at(-maxTurns))]
 }
 
-/** The history plus one tail instruction, or null when no safe trim fits the budget. */
+/** The history plus one tail instruction, or null when the session has no messages. */
 export function buildRequestMessages(session, config) {
   const all = session.deriveMessages?.()
   if (!Array.isArray(all) || all.length === 0) return null
   const instruction = config.prompt || FOLLOWUP_INSTRUCTION
-  const trimmed = trimRequestMessages(all, config, instruction.length + MESSAGE_OVERHEAD_CHARS)
-  if (trimmed === null) return null
-  let history = trimmed.messages
-  if (trimmed.trimmed && config.stripMedia) history = history.map(stripMediaFromMessage)
+  const kept = trimToRecentTurns(all, config.maxTurns)
+  const degraded = kept !== all
+  const history = degraded && config.stripMedia ? kept.map(stripMediaFromMessage) : kept
   return {
     // The tail instruction is one plain user input: no second system slot, so
     // the inherited prefix stays reusable and cache-friendly.
     messages: [...history, { role: 'user', content: [{ type: 'text', text: instruction }] }],
-    degraded: trimmed.trimmed,
+    degraded,
   }
 }
 

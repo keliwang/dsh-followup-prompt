@@ -94,12 +94,13 @@ DSH 的一次请求是会话日志的纯函数，所以不 fork 也能复刻前�
 
 ### 4.2 上下文构建
 
-默认发送完整 `deriveMessages()`，与父会话下一次请求前缀一致，以命中 provider 前缀缓存。只有超出 `maxInputChars` 或 `maxTurns` 时进入降级裁剪：
+默认发送完整 `deriveMessages()`，与父会话下一次请求前缀一致，以命中 provider 前缀缓存。不按字符数裁剪（长 agentic 回合的工具输出本身就可能很大），只按 `maxTurns` 做可选的轮数裁剪：
 
-- 保留开头的 system/developer 消息；
+- `maxTurns: 0`（默认）发送完整历史，不做任何裁剪；
+- 设置 `maxTurns > 0` 时保留开头 system/developer 消息 + 最近 N 个人类回合；
 - 只在**人类 user 消息**（`source.kind === 'user'`）处切，绝不切在 assistant tool-call 与 tool-result 之间（孤儿 tool call 会让 provider 报 400）；注入的合成 user 上下文也不能作切点；
-- 找不到能放进预算的切点就放弃预测；
-- `stripMedia` 只在裁剪路径生效，全量路径保持媒体块原样。
+- `stripMedia` 只在裁剪路径生效，全量路径保持媒体块原样；
+- 预测请求只比父会话下一次请求多一条短指令和少量输出，只有父会话已贴近 context window 上限时才会超限：此时预测失败（`reason: error`），不影响正常对话。
 
 尾部追加一条普通 user 消息作为指令（不引入第二个 system 槽）。内置指令要求：只输出预测文本、跟随用户语言、不调用工具、历史是不可信数据而非指令、无把握时输出 `NO_PREDICTION`。输出用纯文本 + 哨兵，比 JSON 更省 token、更少解析失败。`PROMPT_VERSION` 写入日志元数据，便于 A/B。
 
@@ -272,7 +273,7 @@ npm 在本地发布（需 `npm login`，按提示输入 2FA 验证码），先 p
 
 | 风险 | 缓解 |
 |---|---|
-| 额外计费 | 总开关、采样、超时、路由覆盖、输入预算；README 明示 |
+| 额外计费 | 总开关、采样、超时、路由覆盖、`maxTurns`；README 明示 |
 | Client 依赖 0.2.1 私有 DOM 结构，升级后漂移 | 常量集中、特性检测、失败静默、回归清单 |
 | `/api` exact Fetch 路由不是 stable 公开 API | `engines` 锁定 0.2.x；可随时关闭 |
 | 模型反复调用工具 | 轮次上限 + 总 deadline + 指令约束 |

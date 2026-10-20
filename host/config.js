@@ -15,7 +15,6 @@ export const FIELDS = Object.freeze({
   maxTokens: { type: 'integer', range: [1, 8192], default: 400 },
   timeoutMs: { type: 'integer', range: [2000, 30000], default: 15000 },
   maxTurns: { type: 'integer', range: [0, 1000], default: 0 },
-  maxInputChars: { type: 'integer', range: [0, 2_000_000], default: 20000 },
   prefetchOnTurnEnd: { type: 'boolean', default: false },
   prompt: { type: 'string', maxLength: 20000, default: '' },
 
