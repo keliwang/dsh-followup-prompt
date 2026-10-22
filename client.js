@@ -33,27 +33,22 @@ window.__ModuleLoader__.load({
       fontStyle: 'normal',
       letterSpacing: 'normal',
     })
-    const GHOST_HINT_RESERVE_PX = 118
 
     // `meta.*` mirrors locale/*.json.
     const EN = {
       'meta.title': 'Followup Prompt',
       'meta.description': 'Predicts your next message after each reply and shows it inside the empty composer as an editable draft. Press Tab to accept; it never sends by itself.',
       'prediction.statusAria': 'Predicted next message',
-      'prediction.acceptHint': 'to accept',
-      'prediction.dismissAria': 'Dismiss the prediction',
     }
     const ZH = {
       'meta.title': '后续提示',
       'meta.description': '每轮回复结束后预测你的下一条消息，并在空输入框内显示为可编辑草稿。按 Tab 接受，绝不自动发送。',
       'prediction.statusAria': '预测的下一条消息',
-      'prediction.acceptHint': '接受',
-      'prediction.dismissAria': '关闭预测',
     }
 
     // Theme alias tokens only, so light and dark both resolve through the theme.
     const styles = {
-      // Click-through except the close button, so typing and caret placement still work.
+      // Fully click-through, so typing and caret placement still work.
       root: {
         position: 'absolute',
         top: 0,
@@ -74,54 +69,9 @@ window.__ModuleLoader__.load({
         opacity: 0.58,
         color: 'var(--dsw-alias-label-secondary, currentColor)',
       },
-      hint: {
-        position: 'absolute',
-        display: 'inline-flex',
-        alignItems: 'center',
-        gap: '6px',
-        pointerEvents: 'none',
-        color: 'var(--dsw-alias-label-secondary, currentColor)',
-        fontFamily: 'inherit',
-        fontSize: '11px',
-        lineHeight: '16px',
-        whiteSpace: 'nowrap',
-      },
-      kbd: {
-        fontFamily: 'inherit',
-        fontSize: '11px',
-        lineHeight: '16px',
-        padding: '0 5px',
-        borderRadius: '5px',
-        border: '1px solid var(--dsw-alias-border-l1, rgba(127, 127, 127, 0.18))',
-        background: 'var(--dsw-alias-bg-layer-1, rgba(127, 127, 127, 0.08))',
-        color: 'var(--dsw-alias-label-secondary, currentColor)',
-      },
-      close: {
-        display: 'inline-flex',
-        alignItems: 'center',
-        justifyContent: 'center',
-        width: '18px',
-        height: '18px',
-        padding: 0,
-        border: 'none',
-        borderRadius: '999px',
-        background: 'transparent',
-        color: 'var(--dsw-alias-label-secondary, currentColor)',
-        font: 'inherit',
-        fontSize: '13px',
-        lineHeight: '1',
-        cursor: 'pointer',
-        pointerEvents: 'auto',
-      },
     }
 
     const CSS_TEXT = [
-      '[data-followup-prompt] button { font-family: inherit; }',
-      '[data-followup-prompt] .fup-close:hover {',
-      '  color: var(--dsw-alias-label-primary, currentColor);',
-      '  background: var(--dsw-alias-bg-layer-1, rgba(127, 127, 127, 0.10));',
-      '}',
-      '[data-followup-prompt] .fup-close:focus-visible { outline-offset: 1px; }',
       '@keyframes fup-fade-in { from { opacity: 0; } to { opacity: 1; } }',
       '@media (prefers-reduced-motion: no-preference) {',
       '  [data-followup-prompt] { animation: fup-fade-in 120ms ease-out; }',
@@ -131,10 +81,6 @@ window.__ModuleLoader__.load({
     /** Identity selector: the published snapshots are stable references. */
     function selectSnapshot(snapshot) {
       return snapshot
-    }
-
-    function preventDefault(event) {
-      event.preventDefault()
     }
 
     function isInsideComposer(target) {
@@ -347,21 +293,14 @@ window.__ModuleLoader__.load({
       }, [])
 
       if (!visible) return null
-      function onCloseClick(event) {
-        event.preventDefault()
-        close()
-      }
       const { ready, top, left, width, ...font } = ghostLayout
       const ghostStyle = {
         ...styles.ghost,
         ...font,
         top,
         left,
-        width: ready ? Math.max(24, width - GHOST_HINT_RESERVE_PX) : 'calc(100% - 150px)',
+        width: ready ? Math.max(24, width) : 'calc(100% - 32px)',
       }
-      // `line-height: normal` is valid CSS but not a usable height for the hint.
-      const hintHeight = /^[0-9.]+px$/.test(font.lineHeight) ? font.lineHeight : '22px'
-      const hintStyle = { ...styles.hint, top, right: 8, height: hintHeight }
       return h('div', {
         key: 'followup-prompt',
         ref: ghostRootRef,
@@ -373,20 +312,6 @@ window.__ModuleLoader__.load({
       },
         h('style', { key: 'styles' }, CSS_TEXT),
         h('span', { key: 'ghost', style: ghostStyle }, shown.suggestion),
-        h('span', { key: 'hint', style: hintStyle },
-          h('kbd', { key: 'kbd', style: styles.kbd }, 'Tab'),
-          h('span', { key: 'hintText' }, t('prediction.acceptHint')),
-          h('button', {
-            key: 'close',
-            type: 'button',
-            className: 'fup-close',
-            style: styles.close,
-            title: t('prediction.dismissAria'),
-            'aria-label': t('prediction.dismissAria'),
-            onMouseDown: preventDefault,
-            onClick: onCloseClick,
-          }, '×'),
-        ),
       )
     }
 

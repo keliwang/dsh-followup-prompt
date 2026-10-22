@@ -52,12 +52,12 @@ npx @deepseek-ai/dsh@0.2.1-rc.2 web
 
 ## Usage
 
-When a reply finishes and the composer is empty, the prediction appears where the placeholder would be, with a `Tab to accept` hint on the right.
+When a reply finishes and the composer is empty, the prediction appears where the placeholder would be.
 
 | Action | Effect |
 |---|---|
 | **Tab** | The prediction becomes a draft in the composer with the cursor at the end, ready to edit |
-| **Esc** or click × | Closes this prediction; it does not come back for this turn |
+| **Esc** | Closes this prediction; it does not come back for this turn |
 | Start typing or composing with an input method | The prediction hides; once the composer is cleared, a prediction that was already generated reappears |
 | Start a new turn or switch sessions | The prediction hides |
 

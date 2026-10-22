@@ -216,19 +216,6 @@ function textOf(node) {
   }
 }
 
-function findElement(node, predicate) {
-  if (node === null || node === undefined || typeof node !== 'object') return null
-  if (Array.isArray(node)) {
-    for (const child of node) {
-      const found = findElement(child, predicate)
-      if (found !== null) return found
-    }
-    return null
-  }
-  if (node.__element === true && predicate(node)) return node
-  return findElement(node.props === undefined ? undefined : node.props.children, predicate)
-}
-
 // ── Boot: window.__ModuleLoader__ + client.js import ─────────────────────────
 const dom = createDomShim()
 globalThis.document = dom.document
@@ -345,7 +332,7 @@ test('locale dictionaries registered under the plugin namespace', () => {
   assert.equal(typeof dictionaries.en['meta.title'], 'string')
   assert.equal(typeof dictionaries.zh['meta.title'], 'string')
   assert.equal(typeof dictionaries.en['prediction.statusAria'], 'string')
-  assert.equal(typeof dictionaries.zh['prediction.acceptHint'], 'string')
+  assert.equal(typeof dictionaries.zh['prediction.statusAria'], 'string')
 })
 test('the composer input overlay slot is injected, then registered', () => {
   assert.deepEqual(slotInjections, ['conversation.input.overlay'])
@@ -553,8 +540,12 @@ test('idle edge requests once and mounts the inline ghost', async () => {
   assert.equal(element.props.style.pointerEvents, 'none')
   assert.ok(Number(element.props.style.zIndex) >= 1)
   assert.ok(textOf(element).includes('hello there'))
-  assert.ok(textOf(element).includes('Tab'))
-  assert.ok(textOf(element).includes('t:prediction.acceptHint'))
+  // The overlay renders exactly the style tag plus the inline ghost.
+  assert.equal(element.props.children.length, 2)
+  const [styleElement, ghostElement] = element.props.children
+  assert.equal(styleElement.type, 'style')
+  assert.equal(ghostElement.type, 'span')
+  assert.equal(ghostElement.props.children, 'hello there')
   assert.equal(waitCallCount(), 1)
   assert.equal(actions.calls.captureInsertion, 0)
   assert.equal(actions.calls.submit, 0)
@@ -735,33 +726,6 @@ test('IME composition hides the bar and shows it again after the grace period', 
   componentHarness.unmount()
 })
 
-test('close button dismisses and clears the bar', async () => {
-  fetchCalls.length = 0
-  fetchHandler = async () => jsonResponse({ ok: true, value: { suggestion: 'hello there', turn: 7 } })
-  const state = makeComponentState()
-  const actions = makeInputActions()
-  const dismissCalls = []
-  const { componentHarness, props } = makeComponentProps(state, {
-    waitForSuggestion: injectedFace.waitForSuggestion,
-    dismissSuggestion: payload => {
-      dismissCalls.push(payload)
-      return Promise.resolve()
-    },
-  }, actions)
-  let element = await settle(componentHarness, registrations[0].component, props)
-  assert.notEqual(element, null)
-  const closeButton = findElement(element, node => node.type === 'button' && node.props.className === 'fup-close')
-  assert.notEqual(closeButton, null)
-  const clickEvent = { defaultPrevented: false, preventDefault() { this.defaultPrevented = true } }
-  closeButton.props.onClick(clickEvent)
-  assert.equal(clickEvent.defaultPrevented, true)
-  assert.deepEqual(dismissCalls, [{ sessionId: 'session-1', turn: 7 }])
-  assert.equal(actions.calls.submit, 0)
-  element = await settle(componentHarness, registrations[0].component, props)
-  assert.equal(element, null)
-  componentHarness.unmount()
-})
-
 test('Escape closes the bar through the capture listener', async () => {
   fetchCalls.length = 0
   fetchHandler = async () => jsonResponse({ ok: true, value: { suggestion: 'hello there', turn: 7 } })
@@ -827,6 +791,5 @@ test('only shipped theme alias tokens are referenced', () => {
   const used = new Set([...source.matchAll(/--dsw-[a-z0-9-]+/gi)].map(match => match[0]))
   const unknown = [...used].filter(token => !allowed.has(token) && !token.startsWith('--dsw-radius-'))
   assert.deepEqual(unknown, [])
-  assert.ok(used.has('--dsw-alias-bg-layer-1'))
-  assert.ok(used.has('--dsw-alias-border-l1'))
+  assert.ok(used.has('--dsw-alias-label-secondary'))
 })

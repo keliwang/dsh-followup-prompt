@@ -7,7 +7,7 @@
 
 ## 1. 目标与约束
 
-**要做的事**：回合正常结束后，在空输入框里显示一条「用户下一条消息」的预测。Tab 接受为可编辑草稿，Esc 或 × 关闭；打字、新回合、切会话、输入法组字时隐藏；任何失败都静默。
+**要做的事**：回合正常结束后，在空输入框里显示一条「用户下一条消息」的预测。Tab 接受为可编辑草稿，Esc 关闭；打字、新回合、切会话、输入法组字时隐藏；任何失败都静默。
 
 **硬约束**
 
@@ -53,7 +53,7 @@ Host                                                Client
 4. **缓存调度**。同一回合已有 entry 就复用（等待中的就一起等，已完成的直接返回）；没有就新建并启动生成；全局运行数达到上限时回答 `busy`。
 5. **生成**。`prediction.js` 从会话日志构建压缩对话（§4.1），继承会话的路由和采样参数组成请求（§4.2），流式调用模型，最后归一化与过滤（§4.3）。
 6. **返回**。长轮询在生成结束后返回结果；终态结果按回合缓存，重复请求不会重复计费。
-7. **显示与接受**。Client 把预测渲染成输入框里的灰色 ghost（§5.2）；Tab 写入草稿，Esc 或 × 关闭，两种情况都会 fire-and-forget 地调用 `suggestions/dismiss`。
+7. **显示与接受**。Client 把预测渲染成输入框里的灰色 ghost（§5.2）；Tab 写入草稿，Esc 关闭，两种情况都会 fire-and-forget 地调用 `suggestions/dismiss`。
 8. **作废**。下一次 `turn/start`、`session/disposed` 或插件卸载时，Host 中止进行中的生成并删除 entry。
 
 ## 4. Host
@@ -148,7 +148,7 @@ Host                                                Client
 
 - overlay 的锚点是卡片顶部一个零高度层。ghost 不写死坐标：在 layout effect 里读取 `[data-composer-input]` 的 `getBoundingClientRect()` 和计算后的字体、padding，复制位置和字体；尺寸变化时重新测量。
 - ghost 显示期间隐藏 `[data-composer-placeholder]`，隐藏或卸载时恢复。隐藏和定位在同一个 layout effect 里完成，避免 ghost 和 placeholder 重叠一帧。
-- 除关闭按钮外 pointer-events 穿透，不影响光标和点击。容器是 `role="status" aria-live="polite"`，读屏会播报 ghost 文本。
+- 整层 pointer-events 穿透，不影响光标和点击。容器是 `role="status" aria-live="polite"`，读屏会播报 ghost 文本。
 - 样式只用 `--dsw-alias-*` 主题 token，深浅色自动适配。
 
 依赖的 DOM 属性（`data-composer-input`、`-card`、`-placeholder`）是 0.2.1 的实现细节，集中定义在 `client.js` 顶部常量中。
@@ -156,6 +156,7 @@ Host                                                Client
 ### 5.4 键盘与输入法
 
 - document 在 capture 阶段监听 keydown，以下条件全部满足时才处理：有可见的 ghost、不在输入法组字中（`isComposing` 或 `keyCode 229`）、没有修饰键、目标在 `[data-composer-input]` 内、没有可见的 `listbox`/`menu` 弹层。只有接受或关闭真正生效后才 `preventDefault` + `stopPropagation`，所以 Lexical 的 `TAB_COMMAND` 在没被消费时照常工作。不拦截 Enter。
+- ghost 上不渲染任何按钮或按键提示：右侧不再有 `Tab 接受` 和关闭 `×`，Esc 是唯一的显式关闭入口；打字等自动隐藏后，清空草稿会重新显示本次预测。
 - 写入草稿只用 `captureInsertion()` + `insertText(text, span)`：一次可撤销的插入，带草稿版本校验。`insertText` 返回 false 时不消费 Tab、也不 dismiss，绝不退回会覆盖草稿的 `setDraft`。
 - 键盘守卫是全局的，通过 `activateBar` 桥接到当前可见的 ghost；只有可见的 ghost 才发布 handle，避免不可见的第二个 composer 抢走按键。
 - 输入法：document 级监听 `compositionstart`/`compositionend`（目标在 composer 内）。`compositionend` 后保留 10 ms 宽限，因为 Safari 会在其后才发出 keydown。
@@ -214,7 +215,7 @@ npm run pack:dry  # 查看打包内容
 |---|---|
 | `verify/package.test.mjs` | manifest、exports、files 都存在（含中英文 README）；locale、icon；patch 按序重述全部字段且与 `DEFAULTS` 一致；`pnpm pack --dry-run` 的内容（没有 pnpm 时跳过） |
 | `verify/host.test.mjs` | 用桩 `ctx` 驱动真实 Host 模块：入口与 `Config` schema、配置解析；压缩对话（每轮一对、丢弃 thinking 和工具内容、注入上下文不切轮、`maxTurns`、只追加）；请求策略；路由与错误信封；计费次数与缓存；dismiss；并发与 `busy`；中止；`timeoutMs` 和兜底超时；预生成；子代理排除；卸载清理 |
-| `verify/client.test.mjs` | 用假 DOM 和假 hook 运行时驱动 `client.js`：模块注册、locale/slot、请求格式与静默失败、状态机、切换会话、Tab 接受（只走 `insertText`，从不 submit）、输入法、草稿与运行中隐藏、缓存复显、关闭与 Esc、弹层让出 Tab、主题 token 白名单 |
+| `verify/client.test.mjs` | 用假 DOM 和假 hook 运行时驱动 `client.js`：模块注册、locale/slot、请求格式与静默失败、状态机、切换会话、Tab 接受（只走 `insertText`，从不 submit）、输入法、草稿与运行中隐藏、缓存复显、Esc 关闭、弹层让出 Tab、主题 token 白名单 |
 
 缺口：假 DOM 的 `querySelector` 返回 `null`，ghost 测量和 placeholder 隐藏没有覆盖，需要用 jsdom 补。
 
