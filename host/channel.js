@@ -48,7 +48,6 @@ function lookupSession(ctx, sessionId) {
 
 async function waitForSuggestion({ ctx, cache, getConfig }, request, signal) {
   const config = getConfig()
-  if (!config.enabled) return { suggestion: null, turn: null, reason: 'disabled' }
   const session = lookupSession(ctx, request.sessionId)
   // Subagent traffic must not bill the user or surface in the composer.
   if (session === undefined || isSubagentSession(session)) {

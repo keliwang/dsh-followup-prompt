@@ -216,6 +216,27 @@ function textOf(node) {
   }
 }
 
+/** Walk the fake element tree; function components are not invoked, their props are inspected instead. */
+function findElements(node, predicate) {
+  const found = []
+  function visit(value) {
+    if (value === null || value === undefined) return
+    if (Array.isArray(value)) {
+      for (const child of value) visit(child)
+      return
+    }
+    if (typeof value !== 'object' || value.__element !== true) return
+    if (predicate(value)) found.push(value)
+    visit(value.props === undefined ? undefined : value.props.children)
+  }
+  visit(node)
+  return found
+}
+
+function elementById(element, id) {
+  return findElements(element, (node) => node.props !== undefined && node.props.id === id)[0]
+}
+
 // ── Boot: window.__ModuleLoader__ + client.js import ─────────────────────────
 const dom = createDomShim()
 globalThis.document = dom.document
@@ -236,10 +257,20 @@ globalThis.window = {
 await import('../client.js')
 
 const reactRuntime = createReactRuntime()
+
+// The real page renders the baseline settings frame and controls; these stubs
+// keep the fake React runtime from needing the full primitives implementation.
+const primitivesStub = {
+  SettingsForm: function SettingsForm() {},
+  Tag: function Tag() {},
+  Button: function Button() {},
+}
+
 let requireCalls = []
 const plugin = loaded.factory(function fakeRequire(specifier) {
   requireCalls.push(specifier)
   if (specifier === 'react') return reactRuntime.runtime
+  if (specifier === '@deepseek-ai/dsh-client-ui-primitives') return primitivesStub
   throw new Error(`unexpected client module require: ${String(specifier)}`)
 })
 
@@ -248,6 +279,11 @@ const localeRegistrations = []
 const slotInjections = []
 const registrations = []
 const effects = []
+const clientInjections = []
+let modelCatalogHandler = async () => ({
+  ok: true,
+  value: { groups: [], failures: [], default: { provider: 'deepseek-account', model: 'deepseek-flash' }, routableProviders: [] },
+})
 
 // ── Stubbed same-origin fetch (the only client transport) ───────────────────
 const fetchCalls = []
@@ -308,12 +344,31 @@ const fakeCtx = {
       return () => {}
     },
   },
+  inject(deps, callback) {
+    clientInjections.push([...deps])
+    const child = {
+      effect(factory, label) {
+        const cleanup = factory()
+        effects.push({ label, cleanup })
+        return async () => {
+          if (typeof cleanup === 'function') await cleanup()
+        }
+      },
+      remote: {
+        session: {
+          modelCatalog: (...args) => modelCatalogHandler(...args),
+        },
+      },
+    }
+    callback(child)
+    return { dispose() {} }
+  },
 }
 
 // ── module registration and plugin face ──
-test('ModuleLoader registration under the package id, reading only React', () => {
+test('ModuleLoader registration under the package id, reading React and the baseline primitives', () => {
   assert.equal(loaded?.id, 'dsh-followup-prompt')
-  assert.deepEqual(requireCalls, ['react'])
+  assert.deepEqual(requireCalls, ['react', '@deepseek-ai/dsh-client-ui-primitives'])
 })
 test('plugin face exports inject + apply', () => {
   assert.ok(plugin !== null && typeof plugin === 'object')
@@ -334,9 +389,25 @@ test('locale dictionaries registered under the plugin namespace', () => {
   assert.equal(typeof dictionaries.en['prediction.statusAria'], 'string')
   assert.equal(typeof dictionaries.zh['prediction.statusAria'], 'string')
 })
+
+test('config page copy covers every field in both languages', () => {
+  const [{ dictionaries }] = localeRegistrations
+  const fields = ['reasoningEffort', 'maxTokens', 'timeoutMs', 'prompt']
+  for (const language of ['en', 'zh']) {
+    const dict = dictionaries[language]
+    for (const field of fields) {
+      assert.equal(typeof dict[`config.${field}.label`], 'string', `${language}: config.${field}.label`)
+      assert.equal(typeof dict[`config.${field}.hint`], 'string', `${language}: config.${field}.hint`)
+    }
+    for (const key of ['config.summary', 'config.loading', 'config.unavailable', 'config.intro', 'config.overridden', 'config.reset', 'config.save', 'config.saving', 'config.saveFailed', 'config.readOnly', 'config.invalidNumber', 'config.modelRoute.label', 'config.modelRoute.hint', 'config.modelRoute.sessionDefault', 'config.modelRoute.currentGroup', 'config.modelRoute.loading', 'config.modelRoute.error', 'config.modelRoute.retry']) {
+      assert.equal(typeof dict[key], 'string', `${language}: ${key}`)
+    }
+  }
+})
+
 test('the composer input overlay slot is injected, then registered', () => {
-  assert.deepEqual(slotInjections, ['conversation.input.overlay'])
-  assert.equal(registrations.length, 1)
+  assert.deepEqual(slotInjections, ['conversation.input.overlay', 'plugins.row.config'])
+  assert.equal(registrations.length, 2)
   const { options } = registrations[0]
   assert.equal(options.name, 'conversation.input.overlay')
   assert.equal(options.id, 'followup-prompt')
@@ -346,9 +417,20 @@ test('the composer input overlay slot is injected, then registered', () => {
   assert.equal(typeof options.inject, 'function')
   assert.equal(typeof registrations[0].component, 'function')
 })
+
+test('the plugin settings page registers under the bundle row key', () => {
+  const { options, component } = registrations[1]
+  assert.equal(options.name, 'plugins.row.config')
+  assert.equal(options.key, 'dsh-followup-prompt#followup-prompt')
+  assert.equal(options.locale, 'followup-prompt')
+  assert.equal(typeof component, 'function')
+})
+
 test('apply side effects ride ctx.effect lifetimes', () => {
-  assert.ok(effects.length >= 2)
+  assert.deepEqual(clientInjections, [['remote', 'remote.session']], 'model catalog rides an optional Remote injection')
+  assert.ok(effects.length >= 4)
   assert.ok(effects.some(entry => typeof entry.label === 'string' && entry.label.includes(': dictionaries')))
+  assert.ok(effects.some(entry => typeof entry.label === 'string' && entry.label.includes(': plugin settings page')))
 })
 test('keyboard capture listener installed on document', () => {
   assert.ok(dom.count('keydown') >= 1)
@@ -760,6 +842,310 @@ test('an open command menu keeps Tab for itself', async () => {
   componentHarness.unmount()
 })
 
+// ── Plugin settings page (Plugins → Installed → row Configure) ───────────────
+const CONFIG_PAGE = registrations[1].component
+const CONFIG_DEFAULTS = Object.freeze({
+  provider: '',
+  model: '',
+  reasoningEffort: 'low',
+  maxTokens: 8192,
+  timeoutMs: 30000,
+  prompt: '',
+})
+
+function makeConfigPageProps(options = {}) {
+  const calls = []
+  const form = {
+    state: {
+      status: options.status ?? 'ready',
+      value: { ...CONFIG_DEFAULTS, ...options.value },
+      base: { ...CONFIG_DEFAULTS, ...options.base },
+      user: options.user ?? {},
+      revision: options.revision ?? 7,
+      writable: options.writable !== false,
+    },
+    mutate(ops, revision) {
+      calls.push({ ops, revision })
+      return options.mutate === undefined ? Promise.resolve(true) : options.mutate(ops, revision)
+    },
+  }
+  return {
+    props: {
+      view: 'page',
+      form,
+      t: (key) => `t:${key}`,
+      loadModelCatalog: options.loadModelCatalog === undefined ? async () => ({ groups: [] }) : options.loadModelCatalog,
+    },
+    calls,
+    form,
+  }
+}
+
+async function renderConfigPage(props) {
+  const harness = reactRuntime.createInstance()
+  const element = await settle(harness, CONFIG_PAGE, props)
+  return { harness, element }
+}
+
+function settingsFormOf(element) {
+  const [frame] = findElements(element, (node) => node.type === primitivesStub.SettingsForm)
+  assert.ok(frame !== undefined, 'settings form frame rendered')
+  return frame
+}
+
+/** The real control element a row renders (the row component itself is not invoked by the fake runtime). */
+function controlById(element, id) {
+  const control = findElements(element, (node) => node.props !== undefined
+    && node.props.id === id
+    && (node.type === 'input' || node.type === 'select' || node.type === 'textarea'))[0]
+  assert.ok(control !== undefined, `control ${id} rendered`)
+  return control
+}
+
+/** One field row's props, including the staged override and error the frame would render. */
+function configRowOf(element, id) {
+  const row = findElements(element, (node) => node.props !== undefined
+    && node.props.id === id
+    && typeof node.props.onReset === 'function')[0]
+  assert.ok(row !== undefined, `row ${id} rendered`)
+  return row
+}
+
+test('config page: summary and unavailable views stay text-only', async () => {
+  const summary = await renderConfigPage({ view: 'summary', t: (key) => `t:${key}` })
+  assert.equal(summary.element, 't:config.summary')
+  const unavailable = await renderConfigPage({ view: 'page', form: undefined, t: (key) => `t:${key}` })
+  assert.ok(textOf(unavailable.element).includes('t:config.unavailable'))
+})
+
+test('config page: the frame receives the Host values and a clean staged state', async () => {
+  const { props } = makeConfigPageProps({ value: { timeoutMs: 5000 }, user: { timeoutMs: 5000 } })
+  const { element } = await renderConfigPage(props)
+  const frame = settingsFormOf(element)
+  assert.equal(frame.props.state.available, true)
+  assert.equal(frame.props.state.writable, true)
+  assert.equal(frame.props.state.dirty, false)
+  assert.equal(frame.props.state.invalid, false)
+  assert.equal(frame.props.state.saving, false)
+  assert.equal(frame.props.state.failed, false)
+  assert.equal(frame.props.labels.save, 't:config.save')
+  assert.equal(frame.props.labels.unavailable, 't:config.unavailable')
+  // Only timeoutMs carries a profile override, so exactly that row shows the badge.
+  assert.equal(configRowOf(element, 'followup-config-timeoutMs').props.overridden, true)
+  assert.equal(configRowOf(element, 'followup-config-timeoutMs').props.overriddenLabel, 't:config.overridden')
+  assert.equal(configRowOf(element, 'followup-config-model').props.overridden, false)
+})
+
+test('config page: text and enum edits save their staged values', async () => {
+  const { props, calls } = makeConfigPageProps()
+  const { harness, element } = await renderConfigPage(props)
+  const textarea = findElements(element, (node) => node.type === 'textarea')[0]
+  textarea.props.onChange({ target: { value: 'Predict tersely.' } })
+  controlById(element, 'followup-config-reasoningEffort').props.onChange({ target: { value: 'high' } })
+  const next = await settle(harness, CONFIG_PAGE, props)
+  settingsFormOf(next).props.onSave()
+  await delay(0)
+  assert.deepEqual(calls, [{
+    ops: [
+      { op: 'set', path: ['reasoningEffort'], value: 'high' },
+      { op: 'set', path: ['prompt'], value: 'Predict tersely.' },
+    ],
+    revision: 7,
+  }])
+})
+
+const MODEL_CATALOG = {
+  groups: [
+    {
+      id: 'deepseek-account',
+      name: 'DeepSeek Account',
+      models: [{
+        id: 'deepseek-flash',
+        name: 'DeepSeek Flash',
+        reasoning: { efforts: [{ id: 'low', name: 'Low' }, { id: 'high', name: 'High' }], defaultEffort: 'low' },
+      }],
+    },
+    { id: 'acme', name: 'Acme', models: [{ id: 'acme-pro', name: 'Acme Pro' }] },
+  ],
+  failures: [],
+}
+
+function modelSelectOf(element) {
+  return controlById(element, 'followup-config-model')
+}
+
+function optionValuesOf(element) {
+  return findElements(modelSelectOf(element), (node) => node.type === 'option').map((node) => node.props.value)
+}
+
+test('config page: the model selector lists the DSH catalog grouped by provider', async () => {
+  const { props } = makeConfigPageProps({
+    value: { provider: 'deepseek-account', model: 'deepseek-flash' },
+    loadModelCatalog: async () => MODEL_CATALOG,
+  })
+  const { element } = await renderConfigPage(props)
+  const select = modelSelectOf(element)
+  assert.equal(select.type, 'select')
+  assert.equal(select.props.value, '["deepseek-account","deepseek-flash"]')
+  const values = optionValuesOf(element)
+  assert.ok(values.includes(''), 'session default stays selectable')
+  assert.ok(values.includes('["deepseek-account","deepseek-flash"]'))
+  assert.ok(values.includes('["acme","acme-pro"]'))
+  const groups = findElements(select, (node) => node.type === 'optgroup')
+  assert.deepEqual(groups.map((group) => group.props.label), ['DeepSeek Account', 'Acme'])
+})
+
+test('config page: selecting a catalog model stages the provider/model pair atomically', async () => {
+  const { props, calls } = makeConfigPageProps({ loadModelCatalog: async () => MODEL_CATALOG })
+  const { harness, element } = await renderConfigPage(props)
+  modelSelectOf(element).props.onChange({ target: { value: '["deepseek-account","deepseek-flash"]' } })
+  const next = await settle(harness, CONFIG_PAGE, props)
+  settingsFormOf(next).props.onSave()
+  await delay(0)
+  assert.deepEqual(calls, [{
+    ops: [
+      { op: 'set', path: ['provider'], value: 'deepseek-account' },
+      { op: 'set', path: ['model'], value: 'deepseek-flash' },
+    ],
+    revision: 7,
+  }])
+})
+
+test('config page: a model without the current reasoning effort falls back to the model default', async () => {
+  const { props, calls } = makeConfigPageProps({ loadModelCatalog: async () => MODEL_CATALOG })
+  const { harness, element } = await renderConfigPage(props)
+  modelSelectOf(element).props.onChange({ target: { value: '["acme","acme-pro"]' } })
+  const next = await settle(harness, CONFIG_PAGE, props)
+  settingsFormOf(next).props.onSave()
+  await delay(0)
+  assert.deepEqual(calls, [{
+    ops: [
+      { op: 'set', path: ['provider'], value: 'acme' },
+      { op: 'set', path: ['model'], value: 'acme-pro' },
+      { op: 'set', path: ['reasoningEffort'], value: '' },
+    ],
+    revision: 7,
+  }])
+})
+
+test('config page: the session-default option clears the route pair', async () => {
+  const { props, calls } = makeConfigPageProps({
+    value: { provider: 'acme', model: 'acme-pro', reasoningEffort: '' },
+    loadModelCatalog: async () => MODEL_CATALOG,
+  })
+  const { harness, element } = await renderConfigPage(props)
+  modelSelectOf(element).props.onChange({ target: { value: '' } })
+  const next = await settle(harness, CONFIG_PAGE, props)
+  settingsFormOf(next).props.onSave()
+  await delay(0)
+  assert.deepEqual(calls, [{
+    ops: [
+      { op: 'set', path: ['provider'], value: '' },
+      { op: 'set', path: ['model'], value: '' },
+    ],
+    revision: 7,
+  }])
+})
+
+test('config page: a configured route outside the catalog stays selectable', async () => {
+  const { props } = makeConfigPageProps({
+    value: { provider: 'custom', model: 'custom-1' },
+    loadModelCatalog: async () => MODEL_CATALOG,
+  })
+  const { element } = await renderConfigPage(props)
+  assert.equal(modelSelectOf(element).props.value, '["custom","custom-1"]')
+  assert.ok(optionValuesOf(element).includes('["custom","custom-1"]'))
+  const groups = findElements(modelSelectOf(element), (node) => node.type === 'optgroup')
+  assert.ok(groups.some((group) => group.props.label === 't:config.modelRoute.currentGroup'))
+})
+
+test('config page: a failed catalog read offers a retry', async () => {
+  let reads = 0
+  const loadModelCatalog = async () => {
+    reads += 1
+    if (reads === 1) throw new Error('offline')
+    return MODEL_CATALOG
+  }
+  const { props } = makeConfigPageProps({ loadModelCatalog })
+  const { harness, element } = await renderConfigPage(props)
+  const rowOf = (node) => findElements(node, (candidate) => candidate.props !== undefined
+    && candidate.props.id === 'followup-config-model' && typeof candidate.props.onReset === 'function')[0]
+  const row = rowOf(element)
+  assert.equal(row.props.hint, 't:config.modelRoute.error')
+  const retry = row.props.action
+  assert.equal(retry?.type, primitivesStub.Button, 'retry control rendered beside the row')
+  assert.equal(textOf(retry), 't:config.modelRoute.retry')
+  retry.props.onClick()
+  const next = await settle(harness, CONFIG_PAGE, props)
+  assert.equal(reads, 2)
+  assert.equal(rowOf(next).props.hint, 't:config.modelRoute.hint')
+})
+
+test('config page: a stored half-filled route does not block unrelated saves', async () => {
+  const { props, calls } = makeConfigPageProps({ value: { provider: 'acme', model: '' } })
+  const { harness, element } = await renderConfigPage(props)
+  controlById(element, 'followup-config-timeoutMs').props.onChange({ target: { value: '4000' } })
+  const next = await settle(harness, CONFIG_PAGE, props)
+  assert.equal(settingsFormOf(next).props.state.invalid, false)
+  settingsFormOf(next).props.onSave()
+  await delay(0)
+  assert.deepEqual(calls, [{ ops: [{ op: 'set', path: ['timeoutMs'], value: 4000 }], revision: 7 }])
+})
+
+test('config page: an out-of-range number blocks the save until fixed', async () => {
+  const { props, calls } = makeConfigPageProps()
+  const { harness, element } = await renderConfigPage(props)
+  controlById(element, 'followup-config-maxTokens').props.onChange({ target: { value: '0' } })
+  let next = await settle(harness, CONFIG_PAGE, props)
+  assert.equal(settingsFormOf(next).props.state.invalid, true)
+  settingsFormOf(next).props.onSave()
+  await delay(0)
+  assert.deepEqual(calls, [])
+  const rows = findElements(next, (node) => node.props !== undefined
+    && node.props.id === 'followup-config-maxTokens' && node.props.error !== undefined)
+  assert.equal(rows[0].props.error, 't:config.invalidNumber')
+  controlById(next, 'followup-config-maxTokens').props.onChange({ target: { value: '4096' } })
+  next = await settle(harness, CONFIG_PAGE, props)
+  assert.equal(settingsFormOf(next).props.state.invalid, false)
+  settingsFormOf(next).props.onSave()
+  await delay(0)
+  assert.deepEqual(calls, [{ ops: [{ op: 'set', path: ['maxTokens'], value: 4096 }], revision: 7 }])
+})
+
+test('config page: reset unsets the stored override', async () => {
+  const { props, calls } = makeConfigPageProps({ value: { timeoutMs: 5000 }, user: { timeoutMs: 5000 } })
+  const { harness, element } = await renderConfigPage(props)
+  const reset = configRowOf(element, 'followup-config-timeoutMs')
+  assert.equal(reset.props.overridden, true)
+  reset.props.onReset()
+  const next = await settle(harness, CONFIG_PAGE, props)
+  assert.equal(settingsFormOf(next).props.state.dirty, true)
+  settingsFormOf(next).props.onSave()
+  await delay(0)
+  assert.deepEqual(calls, [{ ops: [{ op: 'unset', path: ['timeoutMs'] }], revision: 7 }])
+})
+
+test('config page: a read-only profile disables every control', async () => {
+  const { props } = makeConfigPageProps({ writable: false })
+  const { element } = await renderConfigPage(props)
+  assert.equal(settingsFormOf(element).props.state.writable, false)
+  assert.ok(findElements(element, (node) => node.type === 'textarea').every((node) => node.props.disabled === true))
+  assert.equal(controlById(element, 'followup-config-reasoningEffort').props.disabled, true)
+  assert.equal(modelSelectOf(element).props.disabled, true)
+})
+
+test('config page: a refused save keeps the draft and reports failure', async () => {
+  const { props } = makeConfigPageProps({ mutate: () => Promise.resolve(false) })
+  const { harness, element } = await renderConfigPage(props)
+  controlById(element, 'followup-config-timeoutMs').props.onChange({ target: { value: '4000' } })
+  let next = await settle(harness, CONFIG_PAGE, props)
+  settingsFormOf(next).props.onSave()
+  await delay(0)
+  next = await settle(harness, CONFIG_PAGE, props)
+  assert.equal(settingsFormOf(next).props.state.failed, true)
+  assert.equal(settingsFormOf(next).props.state.dirty, true, 'the draft survives a refusal')
+})
+
 // ── client source contract guards ──
 const source = readFileSync(new URL('../client.js', import.meta.url), 'utf8')
 test('never calls a submission entry point', () => {
@@ -776,12 +1162,15 @@ test('only shipped theme alias tokens are referenced', () => {
     '--dsw-alias-bg-base',
     '--dsw-alias-bg-layer-1',
     '--dsw-alias-bg-layer-2',
+    '--dsw-alias-bg-layer-3',
     '--dsw-alias-bg-overlay',
     '--dsw-alias-border-l1',
     '--dsw-alias-border-l2',
+    '--dsw-alias-border-l4',
     '--dsw-alias-brand-primary',
     '--dsw-alias-label-primary',
     '--dsw-alias-label-secondary',
+    '--dsw-alias-label-tertiary',
     '--dsw-alias-state-error-primary',
     '--dsw-alias-state-idle-primary',
     '--dsw-alias-state-success-primary',

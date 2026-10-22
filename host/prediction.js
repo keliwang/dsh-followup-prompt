@@ -51,7 +51,7 @@ function messageText(message) {
  * Both sides keep their full visible text. Deterministic from the session log, so the
  * next request's prefix is the previous request's prefix plus one appended pair.
  */
-export function buildPredictionPairs(session, config) {
+export function buildPredictionPairs(session) {
   const all = session.deriveMessages?.()
   if (!Array.isArray(all) || all.length === 0) return []
   const pairs = []
@@ -73,13 +73,12 @@ export function buildPredictionPairs(session, config) {
       current.assistant = current.assistant.length === 0 ? text : `${current.assistant}\n\n${text}`
     }
   }
-  const complete = pairs.filter((pair) => pair.assistant.length > 0)
-  return config.maxTurns > 0 ? complete.slice(-config.maxTurns) : complete
+  return pairs.filter((pair) => pair.assistant.length > 0)
 }
 
 /** Condensed transcript plus the closing user cue, or null when no pair is complete. */
-export function buildRequestMessages(session, config, provider, model) {
-  const pairs = buildPredictionPairs(session, config)
+export function buildRequestMessages(session, provider, model) {
+  const pairs = buildPredictionPairs(session)
   if (pairs.length === 0) return null
   // Synthesized history: no replay state, so no provider signatures are involved.
   const source = { provider, model }
@@ -100,7 +99,7 @@ function buildRequest(session, config) {
   if (typeof provider !== 'string' || provider.length === 0) return null
   if (typeof model !== 'string' || model.length === 0) return null
 
-  const messages = buildRequestMessages(session, config, provider, model)
+  const messages = buildRequestMessages(session, provider, model)
   if (messages === null) return null
 
   // The condensed transcript is standalone: no tools, no tool history and no session

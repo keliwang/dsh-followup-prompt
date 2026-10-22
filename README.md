@@ -26,7 +26,7 @@ After each reply, the plugin guesses what you are most likely to say next and sh
 
 ## Installation
 
-Requires DeepSeek Harness `>=0.2.0 <0.3.0` (verified on 0.2.1-rc.2) with at least one model configured.
+Requires DeepSeek Harness `>=0.2.1-rc.2 <0.3.0` (verified on 0.2.1-rc.2) with at least one model configured.
 
 **Harness Desktop (Windows, macOS)**
 
@@ -65,11 +65,11 @@ Reopening a finished session also shows the prediction for its last turn.
 
 ## How it works
 
-**When the model is called**: only while you are looking at a session whose turn has finished and the composer is empty. The result stays in memory until the next turn starts, so viewing it again is not billed again. Interrupted or failed turns, empty sessions, and subagent sessions are never predicted for. With `prefetchOnTurnEnd` on, a prediction is generated as soon as a turn ends, whether or not you are looking.
+**When the model is called**: only while you are looking at a session whose turn has finished and the composer is empty. The result stays in memory until the next turn starts, so viewing it again is not billed again. Interrupted or failed turns, empty sessions, and subagent sessions are never predicted for.
 
 **What the model receives**: a "condensed transcript". Each turn keeps only your message and the visible text of the model's reply; thinking, tool calls, tool output, and the main conversation's system prompt are left out. Each turn appends just one pair of messages at the end, so the provider's prefix cache builds up turn after turn and most input tokens are billed at the cached rate.
 
-**Cost**: every prediction is an ordinary model request billed by your provider. Turn it off with `enabled`, switch to a cheaper model with `provider` / `model`, or limit the transcript length with `maxTurns`.
+**Cost**: every prediction is an ordinary model request billed by your provider. If you don't want it, switch the plugin off on the Plugins page; to spend less, give predictions their own cheaper model (`provider` / `model`).
 
 **Privacy**
 
@@ -80,20 +80,23 @@ Reopening a finished session also shows the prediction for its last turn.
 
 ## Configuration
 
-On the **Plugins** page, find **Followup Prompt** in the **Installed** list and click its configure button. You can also edit this plugin's `config` in a profile patch directly.
+On the **Plugins** page, find **Followup Prompt** in the **Installed** list and click its configure button to open the settings. Click **Save** when you're done; changes take effect right away, no restart needed.
+
+The **Model** list shows the models you have already set up in DSH, the same ones you see when switching models in the composer. Pick **Session default** to use whatever model your current session is running.
+
+To turn the plugin off, use the switch on its row in the Plugins list.
+
+If you are comfortable with profile patches, you can also edit this plugin's `config` directly.
 
 > [!IMPORTANT]
-> When editing a patch directly, `config` is replaced as a whole, not merged. Even to change one field, write out every field; use this package's [`cordis.patch.yml`](cordis.patch.yml) as a reference.
+> `config` in a patch is replaced as a whole, not merged. When editing by hand, write out every field even to change one; use this package's [`cordis.patch.yml`](cordis.patch.yml) as a reference. Saving from the settings page also rewrites the whole `config`.
 
 | Field | Default | Description |
 |---|---|---|
-| `enabled` | `true` | Master switch. When off, no model requests are made. |
-| `provider` / `model` | `''` / `''` | The model used for predictions; both must be set together. Leave empty to use the current session's model. |
+| `provider` / `model` | `''` / `''` | The model used for predictions; both must be set together. Leave empty to follow the current session's model. Same as the **Model** option on the settings page. |
 | `reasoningEffort` | `'low'` | One of `''`, `off`, `low`, `high`, `max`. `''` uses the model's default; the session's own setting is never inherited. |
 | `maxTokens` | `8192` | Output token limit, reasoning tokens included. Actual output is usually short; the default leaves room for thinking. |
 | `timeoutMs` | `30000` | Timeout for one prediction, 2–30 seconds. |
-| `maxTurns` | `0` | Keep at most the last N turns of the condensed transcript; `0` keeps them all. |
-| `prefetchOnTurnEnd` | `false` | Generate as soon as a turn ends, even for sessions you are not looking at. Incurs cost for every active session. |
 | `prompt` | `''` | Advanced: replaces the built-in prediction instruction. |
 
 ## FAQ
@@ -101,7 +104,7 @@ On the **Plugins** page, find **Followup Prompt** in the **Installed** list and 
 <details>
 <summary><b>No prediction ever appears</b></summary>
 
-- Check that `enabled` is `true`.
+- On the **Plugins** page, check that the plugin's switch is on.
 - With non-DeepSeek models, `reasoningEffort: 'low'` may not be supported; change it to `''`.
 - A prediction is given up when the model takes longer than `timeoutMs`; try a faster model or a lower `reasoningEffort`.
 - Predictions are not shown while the composer contains text or attachments.
@@ -118,7 +121,7 @@ While the slash-command menu or another popup menu is open, Tab belongs to the m
 <details>
 <summary><b>The prediction is misaligned</b></summary>
 
-Where the prediction is drawn depends on the internal structure of the Harness composer, which can shift after a Harness upgrade. Please open an issue; until it is fixed, set `enabled` to `false` to turn the plugin off.
+Where the prediction is drawn depends on the internal structure of the Harness composer, which can shift after a Harness upgrade. Please open an issue; until it is fixed, switch the plugin off on the Plugins page.
 
 </details>
 
@@ -140,7 +143,7 @@ npx @deepseek-ai/dsh@0.2.1-rc.2 plugin --profile web add dsh-followup-prompt@lat
 npx @deepseek-ai/dsh@0.2.1-rc.2 plugin --profile web remove dsh-followup-prompt      # uninstall
 ```
 
-Reload the page afterwards, and restart Harness if needed. To pause the plugin temporarily, switch it off on the Plugins page or set `enabled` to `false`.
+Reload the page afterwards, and restart Harness if needed. To pause the plugin temporarily, switch it off on the Plugins page.
 
 ## Development
 

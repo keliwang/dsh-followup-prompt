@@ -9,12 +9,9 @@
     - id: followup-prompt
       name: dsh-followup-prompt
       config:
-        enabled: true
         provider: ''
         model: ''
         reasoningEffort: 'low'
         maxTokens: 8192
         timeoutMs: 30000
-        maxTurns: 0
-        prefetchOnTurnEnd: false
         prompt: ''

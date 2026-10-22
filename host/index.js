@@ -5,7 +5,6 @@ import { resolveConfig } from './config.js'
 import { PredictionCache } from './cache.js'
 import { generatePrediction } from './prediction.js'
 import { createFetchRoute } from './channel.js'
-import { isSubagentSession, latestCompletedTurn } from './session.js'
 
 export { Config } from './config.js'
 
@@ -22,31 +21,21 @@ export function apply(ctx, rawConfig) {
 
   ctx.effect(() => () => cache.dispose(), 'followup-prompt: cache')
 
-  const onSessionEvent = (session, event) => {
-    if (event?.type === 'turn/start') {
-      // A new turn makes the previous turn's suggestion obsolete; stop paying
-      // for an in-flight prediction nobody may see.
-      cache.invalidate(session.id)
-      return
-    }
-    if (event?.type !== 'turn/end' || event.data?.reason?.kind !== 'completed') return
-    // Only the committed tail turn may be predicted for; a replayed or
-    // out-of-order event must not invalidate newer state.
-    const turn = event.data.turn
-    if (!Number.isInteger(turn) || latestCompletedTurn(session) !== turn) return
-    cache.invalidate(session.id)
-    const config = getConfig()
-    if (!config.enabled || !config.prefetchOnTurnEnd) return
-    if (isSubagentSession(session)) return
-    cache.prefetch(session, turn)
-  }
+  // This bundle ships its own page on the Plugins page, so the settings service
+  // must not generate one for the entry. Optional: a Host without Settings still
+  // runs the plugin face.
+  ctx.inject(['settings'], (settingsCtx) => {
+    settingsCtx.effect(
+      () => settingsCtx.settings.configure({ auto: false }, ctx.fiber),
+      'followup-prompt: own settings page',
+    )
+  })
 
   ctx.on('session/event', (session, event) => {
-    try {
-      onSessionEvent(session, event)
-    } catch (error) {
-      ctx.logger?.debug?.('followup-prompt: session/event handling failed: %s', String(error?.message ?? error))
-    }
+    // A new turn makes the previous turn's suggestion obsolete; stop paying for an
+    // in-flight prediction nobody may see. Waits only ever target the latest
+    // completed turn, so no other event needs cache work.
+    if (event?.type === 'turn/start') cache.invalidate(session.id)
   })
 
   ctx.on('session/disposed', (session) => cache.invalidate(session?.id))

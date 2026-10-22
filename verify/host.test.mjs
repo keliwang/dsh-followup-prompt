@@ -76,10 +76,14 @@ function createHarness(options = {}) {
   const routes = new Map()
   const sessions = new Map()
   const calls = []
+  const injections = []
+  const pagePolicies = []
   const config = options.config ?? { ...DEFAULTS }
   const streams = options.streams ?? (() => textChunks(DEFAULT_SUGGESTION))
+  const fiber = { uid: 'followup-prompt' }
   const ctx = {
     logger: { debug() {}, info() {}, warn() {}, error() {} },
+    fiber,
     on(event, listener) {
       const list = listeners.get(event) ?? []
       list.push(listener)
@@ -91,6 +95,26 @@ function createHarness(options = {}) {
       return async () => {
         if (typeof cleanup === 'function') await cleanup()
       }
+    },
+    inject(deps, callback) {
+      injections.push([...deps])
+      const child = {
+        effect(factory, label) {
+          const cleanup = factory()
+          effects.push({ label, cleanup })
+          return async () => {
+            if (typeof cleanup === 'function') await cleanup()
+          }
+        },
+        settings: {
+          configure(presentation, owner) {
+            pagePolicies.push({ presentation, owner })
+            return () => { pagePolicies.push({ released: true }) }
+          },
+        },
+      }
+      callback(child)
+      return child
     },
     connection: {
       fetch: {
@@ -126,6 +150,9 @@ function createHarness(options = {}) {
     calls,
     routes,
     effects,
+    injections,
+    pagePolicies,
+    fiber,
     addSession(session) {
       sessions.set(session.id, session)
       return session
@@ -211,6 +238,15 @@ test('entry contract: name / inject / Config / apply', () => {
   assert(validated.issues === undefined, `Config rejected the documented defaults: ${JSON.stringify(validated.issues)}`)
 })
 
+test('settings: the row page opts out of the automatic settings page', () => {
+  const harness = createHarness()
+  assert.deepEqual(harness.injections, [['settings']], 'settings is an optional child dependency only')
+  assert.equal(harness.pagePolicies.length, 1, 'one page policy registered')
+  assert.deepEqual(harness.pagePolicies[0].presentation, { auto: false })
+  assert.equal(harness.pagePolicies[0].owner, harness.fiber, 'the policy belongs to the plugin fiber')
+  assert.deepEqual(inject, ['connection', 'llm', 'sessions'], 'the required inject face stays unchanged')
+})
+
 test('config: the resolver covers every schema field', () => {
   const resolved = resolveConfig({})
   assert.deepEqual(Object.keys(resolved), Object.keys(FIELDS), 'resolved key set')
@@ -227,22 +263,18 @@ test('config: the resolver covers every schema field', () => {
 test('config: resolves volatile references and clamps bounds', () => {
   const volatile = (value) => ({ get: () => value })
   const live = resolveConfig({
-    enabled: volatile(false),
     provider: volatile('  cheap-provider  '),
     model: volatile('cheap-model'),
     reasoningEffort: volatile('turbo'),
     maxTokens: volatile(0),
     timeoutMs: volatile(99999),
-    maxTurns: volatile(-4),
     prompt: volatile('  Predict it.  '),
   })
-  assert.equal(live.enabled, false, 'volatile enabled')
   assert.equal(live.provider, 'cheap-provider', 'volatile provider trimmed')
   assert.equal(live.model, 'cheap-model', 'volatile model')
   assert.equal(live.reasoningEffort, DEFAULTS.reasoningEffort, 'invalid reasoning effort falls back')
   assert.equal(live.maxTokens, FIELDS.maxTokens.range[0], 'maxTokens clamped up')
   assert.equal(live.timeoutMs, FIELDS.timeoutMs.range[1], 'timeoutMs capped at 30s')
-  assert.equal(live.maxTurns, 0, 'maxTurns clamped')
   assert.equal(live.prompt, 'Predict it.', 'prompt trimmed')
 
   const halfRoute = resolveConfig({ provider: 'only-provider' })
@@ -276,7 +308,7 @@ test('prediction: the request is a condensed transcript of one pair per turn', (
     { id: 'p-a2', role: 'assistant', source: { kind: 'model', provider: 'p', model: 'm' }, content: [{ type: 'text', text: 'Done.' }] },
   ]
   const { session } = createSession('pairs', { messages })
-  const pairs = buildPredictionPairs(session, resolveConfig({}))
+  const pairs = buildPredictionPairs(session)
   assert.deepEqual(pairs.map((pair) => pair.user), ['Fix the bug in a.js', 'Run the tests'], 'one pair per human turn')
   assert.deepEqual(
     pairs.map((pair) => pair.assistant),
@@ -284,7 +316,7 @@ test('prediction: the request is a condensed transcript of one pair per turn', (
     'assistant side keeps the full visible reply text',
   )
   assert.equal(JSON.stringify(pairs).includes('secret thinking'), false, 'thinking blocks are dropped')
-  const request = buildRequestMessages(session, resolveConfig({}), 'p', 'm')
+  const request = buildRequestMessages(session, 'p', 'm')
   assert(request !== null, 'condensed request built')
   assert.deepEqual(
     request.map((message) => message.role),
@@ -300,7 +332,7 @@ test('prediction: one more turn appends one pair to the same prefix', () => {
     { id: `q-u${index}`, role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text: `question ${index}` }] },
     { id: `q-a${index}`, role: 'assistant', source: { kind: 'model', provider: 'p', model: 'm' }, content: [{ type: 'text', text: `answer ${index}.` }] },
   ]
-  const shape = (session) => buildRequestMessages(session, resolveConfig({}), 'p', 'm')
+  const shape = (session) => buildRequestMessages(session, 'p', 'm')
     .map((message) => ({ role: message.role, text: message.content[0].text }))
   const two = shape(createSession('prefix-two', { messages: [...pair(1), ...pair(2)] }).session)
   const three = shape(createSession('prefix-three', { messages: [...pair(1), ...pair(2), ...pair(3)] }).session)
@@ -319,20 +351,9 @@ test('prediction: injected user context does not start a new pair', () => {
     { id: 'i-a2', role: 'assistant', source: { kind: 'model', provider: 'p', model: 'm' }, content: [{ type: 'text', text: 'second answer.' }] },
   ]
   const { session } = createSession('injected', { messages })
-  const pairs = buildPredictionPairs(session, resolveConfig({}))
+  const pairs = buildPredictionPairs(session)
   assert.equal(pairs.length, 1, 'injected user context is not a turn boundary')
   assert.equal(pairs[0].assistant, 'hi there.\n\nsecond answer.', 'assistant text accumulates across the turn')
-})
-
-test('prediction: maxTurns caps the condensed transcript', () => {
-  const messages = []
-  for (let index = 1; index <= 3; index += 1) {
-    messages.push({ id: `c-u${index}`, role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text: `question ${index}` }] })
-    messages.push({ id: `c-a${index}`, role: 'assistant', source: { kind: 'model', provider: 'p', model: 'm' }, content: [{ type: 'text', text: `answer ${index}.` }] })
-  }
-  const { session } = createSession('cap', { messages })
-  const pairs = buildPredictionPairs(session, resolveConfig({ maxTurns: 2 }))
-  assert.deepEqual(pairs.map((pair) => pair.user), ['question 2', 'question 3'], 'only the most recent pairs are kept')
 })
 
 test('prediction: a session without a complete pair answers no-route', () => {
@@ -342,7 +363,7 @@ test('prediction: a session without a complete pair answers no-route', () => {
       { id: 'e-u1', role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text: 'hello' }] },
     ],
   })
-  assert.equal(buildRequestMessages(session, resolveConfig({})), null, 'no assistant text means no pair')
+  assert.equal(buildRequestMessages(session, 'p', 'm'), null, 'no assistant text means no pair')
 })
 
 test('request: the configured prompt is sent as the system prompt', async () => {
@@ -390,7 +411,7 @@ test('prediction: long tool output never reaches the prediction request', async 
 })
 
 test('turn resolution: latest completed turn walk', async () => {
-  const harness = createHarness({ config: { ...DEFAULTS, enabled: false } })
+  const harness = createHarness()
   try {
     const { session, events } = createSession('turn-walk')
     const push = (event) => appendEvent(harness, session, events, event)
@@ -443,7 +464,7 @@ test('wait: turn/end(completed) + lazy wait makes exactly one call', async () =>
     harness.addSession(session)
     seedCompletedTurn(harness, session, events, 1)
     await flush()
-    assert.equal(harness.calls.length, 0, 'prefetch off: no model call on turn/end')
+    assert.equal(harness.calls.length, 0, 'turn/end alone makes no model call')
     const eventCountBefore = events.length
 
     const first = valueOf(await wait(harness, { sessionId: 'session-lazy' }))
@@ -544,21 +565,6 @@ test('cache: invalidate on turn/start and disposal', async () => {
     harness.emitDisposed(session)
     const afterDispose = valueOf(await wait(harness, { sessionId: 'session-invalidate' }))
     assert.equal(afterDispose.reason, 'unknown-session', 'disposed session state removed')
-  } finally {
-    await harness.disposeAll()
-  }
-})
-
-test('cache: disabled switch answers without touching the model', async () => {
-  const harness = createHarness({ config: { ...DEFAULTS, enabled: false } })
-  try {
-    const { session, events } = createSession('session-disabled')
-    harness.addSession(session)
-    seedCompletedTurn(harness, session, events, 1)
-    const value = valueOf(await wait(harness, { sessionId: 'session-disabled' }))
-    assert.equal(value.suggestion, null, 'disabled has no suggestion')
-    assert.equal(value.reason, 'disabled', 'disabled reason')
-    assert.equal(harness.calls.length, 0, 'disabled makes no model call')
   } finally {
     await harness.disposeAll()
   }
@@ -750,7 +756,7 @@ test('timeout: timeoutMs aborts a hung model call as timeout', async () => {
   }
 })
 
-// ── Concurrency, abort, prefetch ─────────────────────────────────────────
+// ── Concurrency, abort ───────────────────────────────────────────────────
 test('concurrency: concurrent waiters share one generation', async () => {
   let release
   const gate = new Promise((resolve) => {
@@ -855,53 +861,9 @@ test('abort: a cancelled waiter stops the unobserved generation', async () => {
   }
 })
 
-test('prefetch: turn/end(completed) pre-generates exactly once', async () => {
-  const harness = createHarness({
-    config: { ...DEFAULTS, prefetchOnTurnEnd: true },
-    streams: () => textChunks('Prefetched suggestion'),
-  })
-  try {
-    const { session, events } = createSession('session-prefetch')
-    harness.addSession(session)
-    seedCompletedTurn(harness, session, events, 1)
-    await flush()
-    await flush()
-    assert.equal(harness.calls.length, 1, 'exactly one prefetch generation')
-    const value = valueOf(await wait(harness, { sessionId: 'session-prefetch' }))
-    assert.equal(value.suggestion, 'Prefetched suggestion', 'prefetched suggestion served')
-    assert.equal(harness.calls.length, 1, 'wait reuses the prefetched result')
-
-    appendEvent(harness, session, events, { type: 'turn/start', data: { turn: 2 } })
-    await flush()
-    const openTurn = valueOf(await wait(harness, { sessionId: 'session-prefetch' }))
-    assert.equal(openTurn.reason, 'no-completed-turn', 'a new turn obsoletes the old suggestion')
-  } finally {
-    await harness.disposeAll()
-  }
-})
-
-test('prefetch: non-completed turn endings never generate', async () => {
-  const harness = createHarness({
-    config: { ...DEFAULTS, prefetchOnTurnEnd: true },
-    streams: () => textChunks('Should not appear'),
-  })
-  try {
-    const { session, events } = createSession('session-prefetch-aborted')
-    harness.addSession(session)
-    appendEvent(harness, session, events, { type: 'turn/start', data: { turn: 1 } })
-    appendEvent(harness, session, events, { type: 'turn/end', data: { turn: 1, reason: { kind: 'aborted' } } })
-    await flush()
-    await flush()
-    assert.equal(harness.calls.length, 0, 'aborted turn is not predicted for')
-  } finally {
-    await harness.disposeAll()
-  }
-})
-
 test('lifecycle: disposal aborts in-flight work and unregisters the route', async () => {
   let streamAborted = false
   const harness = createHarness({
-    config: { ...DEFAULTS, prefetchOnTurnEnd: true },
     streams: (request) => (async function* stream() {
       await new Promise((resolve) => {
         const onAbort = () => {
@@ -917,10 +879,14 @@ test('lifecycle: disposal aborts in-flight work and unregisters the route', asyn
   const { session, events } = createSession('session-dispose')
   harness.addSession(session)
   seedCompletedTurn(harness, session, events, 1)
+  const pending = wait(harness, { sessionId: 'session-dispose' })
   await flush()
-  assert.equal(harness.calls.length, 1, 'prefetch generation started')
+  assert.equal(harness.calls.length, 1, 'the long poll started the generation')
   await harness.disposeAll()
   await delay(20)
   assert.equal(streamAborted, true, 'plugin disposal aborted the in-flight generation')
   assert.equal(harness.routes.size, 0, 'route unregistered on disposal')
+  const settled = valueOf(await pending)
+  assert.equal(settled.suggestion, null, 'the poll resolves after disposal')
+  assert.equal(settled.reason, 'aborted', 'disposal reports aborted')
 })

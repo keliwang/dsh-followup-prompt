@@ -5,14 +5,11 @@ import z from '@deepseek-ai/schemastery'
 
 // The single source of truth for every setting; cordis.patch.yml restates them in order.
 export const FIELDS = Object.freeze({
-  enabled: { type: 'boolean', default: true },
   provider: { type: 'string', default: '' },
   model: { type: 'string', default: '' },
   reasoningEffort: { type: 'enum', values: ['', 'off', 'low', 'high', 'max'], default: 'low' },
   maxTokens: { type: 'integer', range: [1, 8192], default: 8192 },
   timeoutMs: { type: 'integer', range: [2000, 30000], default: 30000 },
-  maxTurns: { type: 'integer', range: [0, 1000], default: 0 },
-  prefetchOnTurnEnd: { type: 'boolean', default: false },
   prompt: { type: 'string', maxLength: 20000, default: '' },
 })
 

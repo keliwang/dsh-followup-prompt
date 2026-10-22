@@ -1,5 +1,5 @@
 // In-memory prediction cache and scheduler, one entry per session. Nothing is persisted.
-// Callers gate on `enabled` and subagent policy; the cache only schedules and stores.
+// Callers gate on subagent policy; the cache only schedules and stores.
 // Entries live until the session's next turn/start, its disposal, or plugin disposal.
 
 /** Global cap on running generations; extra requests answer `busy` instead of queueing. */
@@ -43,7 +43,7 @@ export class PredictionCache {
    */
   async wait({ session, turn, waitMs, signal }) {
     if (this.#disposed) return { suggestion: null, turn, reason: 'aborted' }
-    const entry = this.#ensure(session, turn, false)
+    const entry = this.#ensure(session, turn)
     if (entry === null) return { suggestion: null, turn, reason: 'busy' }
     if (entry.dismissed || entry.state === 'done') return resultOf(entry)
 
@@ -56,11 +56,6 @@ export class PredictionCache {
       entry.waiters -= 1
       this.#releaseIfUnobserved(entry)
     }
-  }
-
-  prefetch(session, turn) {
-    if (this.#disposed) return
-    this.#ensure(session, turn, true)
   }
 
   dismiss(sessionId, turn) {
@@ -84,7 +79,7 @@ export class PredictionCache {
     this.#entries.clear()
   }
 
-  #ensure(session, turn, prefetch) {
+  #ensure(session, turn) {
     const sessionId = String(session.id)
     const existing = this.#entries.get(sessionId)
     if (existing?.turn === turn) return existing
@@ -107,7 +102,6 @@ export class PredictionCache {
       promise,
       resolve,
       waiters: 0,
-      prefetch,
     }
     this.#entries.set(sessionId, entry)
     Promise.resolve()
@@ -139,12 +133,12 @@ export class PredictionCache {
   }
 
   /**
-   * The last waiter leaving stops a generation nobody else will read (prefetch excepted)
-   * and forgets it, so a later wait regenerates instead of reading a cancelled result.
-   * Settling it here also frees its concurrency slot even if the provider ignores abort.
+   * The last waiter leaving stops a generation nobody else will read and forgets it,
+   * so a later wait regenerates instead of reading a cancelled result. Settling it
+   * here also frees its concurrency slot even if the provider ignores abort.
    */
   #releaseIfUnobserved(entry) {
-    if (entry.state !== 'running' || entry.prefetch || entry.dismissed || entry.waiters > 0) return
+    if (entry.state !== 'running' || entry.dismissed || entry.waiters > 0) return
     this.#forget(entry)
     this.#cancel(entry, 'no waiter')
   }

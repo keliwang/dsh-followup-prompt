@@ -26,7 +26,7 @@
 
 ## 安装
 
-需要 DeepSeek Harness `>=0.2.0 <0.3.0`（已在 0.2.1-rc.2 上验证），并且至少配置好一个模型。
+需要 DeepSeek Harness `>=0.2.1-rc.2 <0.3.0`（已在 0.2.1-rc.2 上验证），并且至少配置好一个模型。
 
 **Harness Desktop（Windows、macOS）**
 
@@ -65,11 +65,11 @@ npx @deepseek-ai/dsh@0.2.1-rc.2 web
 
 ## 工作方式
 
-**什么时候请求模型**：只在你正看着一个已结束回合的会话、并且输入框为空时请求；结果在内存里保留到下一回合开始，重复查看不会再次计费。被中断或出错的回合、空会话、子代理会话都不会预测。开启 `prefetchOnTurnEnd` 后，回合一结束就预先生成，不管你是否在看。
+**什么时候请求模型**：只在你正看着一个已结束回合的会话、并且输入框为空时请求；结果在内存里保留到下一回合开始，重复查看不会再次计费。被中断或出错的回合、空会话、子代理会话都不会预测。
 
 **发给模型的是什么**：一份「压缩对话」：每一轮只有你的消息和模型回复中可见的文字，不含 thinking、工具调用、工具输出，也不含主对话的系统提示词。每轮只在末尾追加一对消息，所以 provider 的前缀缓存会逐轮累积，大部分输入 token 按缓存价计费。
 
-**费用**：每次预测都是一次普通的模型请求，按所用 provider 正常计费。可以用 `enabled` 关闭，用 `provider` / `model` 换成更便宜的模型，或者用 `maxTurns` 限制对话长度。
+**费用**：每次预测都是一次普通的模型请求，按所用 provider 正常计费。不想用时在插件页关掉它；想省钱可以给预测单独选一个更便宜的模型（`provider` / `model`）。
 
 **隐私**
 
@@ -80,20 +80,23 @@ npx @deepseek-ai/dsh@0.2.1-rc.2 web
 
 ## 配置
 
-在 **插件** 页的 **已安装** 列表中，点 **后续提示** 这一行的配置按钮修改；也可以直接编辑 profile patch 里本插件的 `config`。
+在 **插件** 页的 **已安装** 列表中找到 **后续提示**，点它的配置按钮打开设置。改完点 **保存**，马上生效，不用重启。
+
+**模型** 下拉框里列的是你在 DSH 里已经配好的模型，和输入框里切换模型时看到的一样。选 **跟随当前会话**，就用你当前会话正在用的模型。
+
+想停用插件，关掉插件列表里它那一行的开关即可。
+
+熟悉 profile patch 的话，也可以直接编辑本插件的 `config`。
 
 > [!IMPORTANT]
-> 直接编辑 patch 时，`config` 会被整体替换，而不是合并。即使只改一个字段，也要写出全部字段，可以参考本包的 [`cordis.patch.yml`](cordis.patch.yml)。
+> patch 里的 `config` 是整体替换的，不会合并。手动编辑时，即使只改一个字段，也要写出全部字段，可以参考本包的 [`cordis.patch.yml`](cordis.patch.yml)。在配置页点保存时，同样会整段重写 `config`。
 
 | 字段 | 默认值 | 说明 |
 |---|---|---|
-| `enabled` | `true` | 总开关。关闭后不再发出任何模型请求。 |
-| `provider` / `model` | `''` / `''` | 用于预测的模型，两项必须同时填写；留空则使用当前会话的模型。 |
+| `provider` / `model` | `''` / `''` | 用于预测的模型，两项必须同时填写；留空则跟随当前会话的模型。对应配置页里的 **模型** 选项。 |
 | `reasoningEffort` | `'low'` | 可选 `''`、`off`、`low`、`high`、`max`。`''` 表示使用模型的默认值；不会跟随会话的设置。 |
 | `maxTokens` | `8192` | 输出 token 上限，推理 token 也计入。实际输出通常很短，默认值是给 thinking 留的余量。 |
 | `timeoutMs` | `30000` | 单次预测的超时，范围 2–30 秒。 |
-| `maxTurns` | `0` | 压缩对话最多保留最近几轮，`0` 表示全部保留。 |
-| `prefetchOnTurnEnd` | `false` | 回合一结束就预先生成，即使你没有在看这个会话。会为所有活跃会话产生费用。 |
 | `prompt` | `''` | 高级：替换内置的预测指令。 |
 
 ## 常见问题
@@ -101,7 +104,7 @@ npx @deepseek-ai/dsh@0.2.1-rc.2 web
 <details>
 <summary><b>一直看不到预测</b></summary>
 
-- 确认 `enabled` 为 `true`。
+- 到 **插件** 页确认插件的开关是打开的。
 - 使用非 DeepSeek 模型时，`reasoningEffort: 'low'` 可能不受支持，改为 `''`。
 - 模型响应超过 `timeoutMs` 时这次预测会放弃；可以换更快的模型，或者把 `reasoningEffort` 调低。
 - 输入框里有文字或附件时预测不会显示。
@@ -118,7 +121,7 @@ npx @deepseek-ai/dsh@0.2.1-rc.2 web
 <details>
 <summary><b>预测位置错位</b></summary>
 
-预测的显示位置依赖 Harness 输入框的内部结构，Harness 升级后可能错位。请提 issue；在修复之前可以把 `enabled` 设为 `false` 临时关闭。
+预测的显示位置依赖 Harness 输入框的内部结构，Harness 升级后可能错位。请提 issue；修复之前可以先在插件页关掉它的开关。
 
 </details>
 
@@ -140,7 +143,7 @@ npx @deepseek-ai/dsh@0.2.1-rc.2 plugin --profile web add dsh-followup-prompt@lat
 npx @deepseek-ai/dsh@0.2.1-rc.2 plugin --profile web remove dsh-followup-prompt      # 卸载
 ```
 
-完成后刷新页面，必要时重启 Harness。只想暂时停用时，在插件页关掉它的开关，或者把 `enabled` 设为 `false`。
+完成后刷新页面，必要时重启 Harness。只想暂时停用时，在插件页关掉它的开关。
 
 ## 开发
 

@@ -2,7 +2,7 @@
 
 面向维护者，说明插件怎么实现、为什么这样实现、怎么开发和发布。使用说明见 [`README.zh.md`](../README.zh.md)；Host 与浏览器之间的接口契约见 [`protocol.md`](protocol.md)，本文不重复契约细节。
 
-- 版本基线：DSH Desktop **0.2.1-rc.2**（`engines.dsh: >=0.2.0 <0.3.0`）
+- 版本基线：DSH Desktop **0.2.1-rc.2**（`engines.dsh: >=0.2.1-rc.2 <0.3.0`）
 - 参照功能：Codex Composer Predictions
 
 ## 1. 目标与约束
@@ -40,16 +40,16 @@ Host                                                Client
 | `host/prediction.js` | 构建压缩对话和请求、调用模型、归一化与过滤输出；从不抛错 | `@deepseek-ai/dsh-llm` |
 | `host/session.js` | 会话只读视图：`latestCompletedTurn()`、`isSubagentSession()` | 无 |
 | `host/config.js` | 字段表 `FIELDS` 及由它生成的 schema、`DEFAULTS`、`resolveConfig()` | `@deepseek-ai/schemastery` |
-| `client.js` | 浏览器半边：overlay slot、状态机、ghost 定位、键盘接受 | 宿主注入的 React |
+| `client.js` | 浏览器半边：overlay slot、状态机、ghost 定位、键盘接受、`plugins.row.config` 配置页 | 宿主注入的 React、`@deepseek-ai/dsh-client-ui-primitives`，以及可选的 `remote.session` 模型目录 |
 | `cordis.patch.yml` | 插入 Host Loader row，按顺序重述全部配置默认值 | — |
 
 依赖方向是单向的：`cache.js` 只管调度，生成函数由 `index.js` 注入（闭包里读取当时的配置）；`prediction.js` 不知道缓存和传输的存在。
 
 ## 3. 一次预测的完整流程
 
-1. **回合结束**。Host 收到 `turn/end`（`reason.kind === 'completed'`），且它就是日志尾部最新完成的回合时，先作废该会话的旧 entry；开启了 `prefetchOnTurnEnd` 时立即在后台生成。
+1. **回合结束**。Host 收到 `turn/end`（`reason.kind === 'completed'`），且它就是日志尾部最新完成的回合时，先作废该会话的旧 entry。
 2. **Client 发起请求**。会话进入空闲、输入框为空时，Client 在这个空闲周期内只调用一次 `suggestions/wait`。
-3. **Host 选定回合**。`channel.js` 依次检查总开关、会话是否存在、是否为子代理会话，再用 `latestCompletedTurn()` 确定回合，然后交给缓存。
+3. **Host 选定回合**。`channel.js` 依次检查会话是否存在、是否为子代理会话，再用 `latestCompletedTurn()` 确定回合，然后交给缓存。
 4. **缓存调度**。同一回合已有 entry 就复用（等待中的就一起等，已完成的直接返回）；没有就新建并启动生成；全局运行数达到上限时回答 `busy`。
 5. **生成**。`prediction.js` 从会话日志构建压缩对话（§4.1），继承会话的路由和采样参数组成请求（§4.2），流式调用模型，最后归一化与过滤（§4.3）。
 6. **返回**。长轮询在生成结束后返回结果；终态结果按回合缓存，重复请求不会重复计费。
@@ -64,7 +64,6 @@ Host                                                Client
 
 - 按 `session.deriveMessages()` 里的人类消息（`role === 'user'` 且 `source.kind === 'user'`）切轮；注入的 system-reminder、skill、goal 等上下文不构成新轮。
 - 每轮只保留「用户消息全文 + 该轮所有 assistant 文本块按顺序拼接」；thinking、tool call、工具输出全部丢弃。没有 assistant 文本的轮次不计入。
-- `maxTurns > 0` 时只保留最近 N 轮；默认 `0` 表示全部保留。
 - 消息序列为「每轮一对 user/assistant」，末尾加一条固定短 cue（`PREDICTION_CUE`）。预测指令放在请求的 system prompt 里；cue 只是给生成一个合法的回合，因为开启 thinking 的请求不能以 assistant 消息结尾。
 
 这样设计是为了前缀缓存：压缩对话完全由会话日志决定，上一次请求去掉末尾 cue 后，就是下一次请求的严格前缀，每轮真正新增的只有一对消息和 cue。真机上暖机一轮后命中率约 97%（§7.3）。压缩对话只有可见文本，远小于原始历史，也不会把模型带回「继续干活」的状态。
@@ -104,7 +103,7 @@ Host                                                Client
 
 - **去重**：同一回合的并发 `wait` 共享一次生成，多窗口或重试不会重复计费。
 - **等待**：长轮询一直等到生成结束。生成自身受 `timeoutMs` 约束；`wait` 另设 `timeoutMs + WAIT_GRACE_MS`（2 s）的兜底，防止 provider 忽略中止信号时一直挂着。
-- **离开**：客户端中止只移除一个 waiter。最后一个 waiter 离开时，未被预生成的生成会被中止并从缓存中移除，同时释放它的并发名额（即使 provider 不理会中止信号）。
+- **离开**：客户端中止只移除一个 waiter。最后一个 waiter 离开时，生成会被中止并从缓存中移除，同时释放它的并发名额（即使 provider 不理会中止信号）。
 - **缓存**：终态结果按回合缓存，包括 `null`，避免重复计费；`no-route` 和被取消的生成不缓存。dismiss 之后同一回合回答 `stale`。
 - **并发**：全局运行中的生成达到 `MAX_CONCURRENT`（2）时直接回答 `busy`，不排队。
 - **生命周期**：没有 TTL。entry 在下一次 `turn/start`、`session/disposed` 或插件卸载时清除；每个会话最多一条，内容不超过 400 字符。按时间过期反而会让同一回合重复计费。
@@ -116,9 +115,11 @@ Host                                                Client
 ### 4.5 配置
 
 - `FIELDS` 是唯一的配置来源。每个字段声明类型、默认值和范围，`Config` schema、`DEFAULTS` 和 `resolveConfig()` 都由它生成。字段含义见 README 配置表。
-- 每个字段都是 `.volatile()`：0.2.1 会把它们替换成 Settings 页就地更新的 live 引用（`{ get() }`）。所以运行时不缓存配置快照，每个使用点都通过 `resolveConfig()` 重新解析。它负责解包引用、夹取范围、按字段兜底，手改坏的配置不会让会话崩溃，下游代码直接使用解析后的值。
+- 每个字段都是 `.volatile()`：设置服务据此把它们投影成可编辑表单，运行时把它们替换成 live 引用（`{ get() }`）。所以运行时不缓存配置快照，每个使用点都通过 `resolveConfig()` 重新解析。它负责解包引用、夹取范围、按字段兜底，手改坏的配置不会让会话崩溃，下游代码直接使用解析后的值。
+- 可视化入口是 Plugins 页的 `plugins.row.config` 插槽（key 是 `<包名>#<行 id>`，即 `dsh-followup-prompt#followup-prompt`），页面由本包的 browser half 注册。Host 侧通过可选的 `ctx.inject(['settings'], ...)` 调用 `settings.configure({ auto: false }, ctx.fiber)`，声明本行有自己的页面，避免将来设置服务自动生成重复页面；不注入 settings 的部署照常运行。
+- 页面只编辑 volatile 字段：`form.state` 提供 Host 解析值、继承层、profile 覆盖层、revision 和可写性，`form.mutate` 一次提交全部改动。保存经设置服务和 ConfigEditor 写入活动 profile 的 patch（写出的 `config` 包含全部字段），Loader 就地更新 volatile 引用，不需要重启。
 - 用户不需要调的值是模块常量，不是配置：`MAX_SUGGESTION_CHARS`、`MAX_CONCURRENT`、`WAIT_GRACE_MS`。需要暴露时再加进 `FIELDS`。旧 patch 里残留的未知字段会被忽略。
-- profile patch 的 `config` 是整体替换，所以 `cordis.patch.yml` 必须按顺序重述全部字段，并与 `DEFAULTS` 逐项一致（`npm test` 会校验）。
+- profile patch 的 `config` 是整体替换，所以 `cordis.patch.yml` 必须按顺序重述全部字段，并与 `DEFAULTS` 逐项一致（`npm test` 会校验）。browser half 无法 import Host schema，所以 `client.js` 里的 `CONFIG_FIELDS` 是 JSON 字面量，由 `verify/package.test.mjs` 与 `FIELDS` 逐项比对，防止漂移。
 
 ### 4.6 可观测性
 
@@ -130,7 +131,7 @@ Host                                                Client
 
 ### 5.1 模块形态
 
-`client.js` 是经典脚本，通过 `window.__ModuleLoader__.load({ id: 'dsh-followup-prompt', factory })` 注册。没有构建步骤和 JSX，只使用模块表提供的 React，`inject: ['slots', 'locale']`。它只按 0.2.1 的真实 API 编写，不为不存在的 API 写兜底分支。`apply` 在 `ctx.effect` 中注册三样东西：词典、document 级键盘守卫、`conversation.input.overlay` slot entry（order 100，排在菜单之后）。
+`client.js` 是经典脚本，通过 `window.__ModuleLoader__.load({ id: 'dsh-followup-prompt', factory })` 注册。没有构建步骤和 JSX，只使用模块表提供的 React 与 baseline 模块 `@deepseek-ai/dsh-client-ui-primitives`（`SettingsForm`/`Switch`/`Tag`/`Button`），`inject: ['slots', 'locale']`。它只按 0.2.1 的真实 API 编写，不为不存在的 API 写兜底分支。`apply` 在 `ctx.effect` 中注册四样东西：词典、document 级键盘守卫、`conversation.input.overlay` slot entry（order 100，排在菜单之后）、`plugins.row.config` slot entry（插件配置页）。
 
 所有 RPC 失败（网络错误、非 200、中止、坏 JSON、`ok: false`）都在 `call()` 里折叠成 `null`，组件只需要区分「有预测」和「没有」。
 
@@ -165,16 +166,29 @@ Host                                                Client
 
 文案通过 `ctx.locale.register('followup-prompt', { en, zh })` 注册。`locale/*.json` 只包含插件管理器展示用的 `meta.title`/`meta.description`，必须和 `client.js` 里词典的 `meta.*` 保持一致。
 
+### 5.6 插件配置页
+
+Plugins 页的每个 bundle 行有一个可选的配置页插槽：`plugins.row.config`，key 是 `<包名>#<bundle patch 里的行 id>`，本插件注册为 `dsh-followup-prompt#followup-prompt`。行上因此出现 **配置** 控件，打开后页面收到 `view` 与 `form`：
+
+- `view === 'summary'` 只返回一行说明（行的 package 描述缺失时作为兜底）。
+- `view === 'page'` 时 `form.state` 是 Host 的 `ConfigFormSnapshot`：`value`（解析值）、`base`（继承层）、`user`（profile 覆盖层）、`revision`、`writable`；`form.mutate(ops, revision)` 一次性提交带路径的 `set`/`unset` 操作。页面在 `status !== 'ready'`、`form` 缺失或 profile 只读时给出对应提示。
+- 编辑先落在本地草稿：文本字段保留原始文本，开关/枚举保留类型值；**覆盖** 标记取自 `user` 的 key 存在性（暂存的编辑按保存后结果预览），每行可 **重置**（`unset`，回到继承层）。
+- 保存时把草稿解析成一次原子写：整数做范围校验、文本校验长度；模型选择器总是成对写入 `provider`/`model`，有错误时不发请求。保存成功清空草稿，Host 拒绝或网络失败保留草稿并提示。revision 用当前快照的 revision，Host 侧冲突检测与恢复由设置服务负责。
+- 页面帧与确认控件复用 `ui-primitives`（baseline 模块，动态插件可直接 require，无需额外依赖）；行内控件用 `--dsw-alias-*` 主题 token 自绘，和官方配置页的观感一致。
+- `provider` / `model` 不裸填：两行合并成一个模型选择器，选项来自 Host 的 `remote.session.modelCatalog()`（与输入框模型选择器同一份目录）。插件通过可选的 `ctx.inject(['remote', 'remote.session'])` 取得 loader，因此没有 Remote 组装的客户端仍能运行（页面显示列表不可用，而不是退化成文本框）。选择器按 provider 分组、排序与官方选择器一致（account / official 在前），**跟随当前会话** 对应 `provider`/`model` 皆空；当前配置不在目录里时保留为「当前配置」选项，避免静默改道。选中模型时，如果模型的 reasoning 元数据不包含当前 `reasoningEffort`，同一次保存里把它落回 `''`（模型默认），与 DSH 选择器的行为一致。读取失败时给出重试按钮。
+
 ## 6. 关键决策与否决方案
 
 | 决策 | 选择 | 理由 |
 |---|---|---|
 | 交付形态 | 独立安装式 bundle | 只用公开 API，可以单独安装、卸载，不依赖 dsh 仓库的构建 |
-| 触发 | Client 按需请求 + Host 缓存；`prefetchOnTurnEnd` 可选，默认关闭 | 只为用户正在看的会话付费；打开已结束的会话时自然能补上 |
+| 触发 | Client 按需请求 + Host 缓存 | 只为用户正在看的会话付费；打开已结束的会话时自然能补上 |
 | 回合判定 | `turn/end` 且 `reason.kind === 'completed'` | 在提交之后触发、不阻塞，此时历史已经完整。`agent/turn-stopping` 会被 loop await，拖慢回合关闭；`agent/status` 粒度不对 |
 | 上下文 | 独立压缩对话 + 一次性 `ctx.llm.stream()` | 见 §4.1；不 fork 的原因见下 |
 | 传输 | `/api` 下的 exact Fetch 路由 | 自动继承 `/api` 的鉴权、Origin 校验、body 限制和请求取消 |
 | UI | `conversation.input.overlay` 内联 ghost | 最接近 Codex 的体验；`conversation.input.dock` 上方的建议条留作降级方案 |
+| 配置页 | Plugins 页 `plugins.row.config` + `ui-primitives` 表单帧 | harness 的既定扩展点：bundle 行自己注册页面，Settings 只保留只读清单；Host 侧用 `settings.configure({ auto: false })` 声明自有页面 |
+| 模型选择 | `remote.session.modelCatalog()` + 可选 `ctx.inject` | 与 DSH 自己的模型选择器同源，不需要插件维护 provider/model 表；Remote 不在时降级为不可用提示而不是裸填 |
 | 存储 | 进程内 `Map<sessionId, Entry>` | 第三方插件不能新增会话事件类型 |
 
 **为什么不 fork**：Codex 用继承式的临时 fork，让预测请求复用父会话前缀又不落盘。DSH 0.2.1 只有持久 fork：子会话会落盘、进会话列表、启动真正的 agent（工具会执行、compaction 会跑），用它做一次性预测会污染会话。
@@ -190,7 +204,6 @@ Host                                                Client
 | 替换 `conversation.composer` | 要复刻整个 InputBar（Lexical、附件、快捷键、i18n） |
 | 往 contenteditable 注入 DOM | Lexical reconciler 会覆盖它，并破坏选区、撤销和输入法 |
 | 直接调用 `webServer.register` | 要自己实现一遍鉴权 |
-| 回合结束时预生成作为默认 | 会为用户没在看的会话付费 |
 
 ## 7. 开发、验证与发布
 
@@ -213,11 +226,11 @@ npm run pack:dry  # 查看打包内容
 
 | 测试文件 | 覆盖 |
 |---|---|
-| `verify/package.test.mjs` | manifest、exports、files 都存在（含中英文 README）；locale、icon；patch 按序重述全部字段且与 `DEFAULTS` 一致；`pnpm pack --dry-run` 的内容（没有 pnpm 时跳过） |
-| `verify/host.test.mjs` | 用桩 `ctx` 驱动真实 Host 模块：入口与 `Config` schema、配置解析；压缩对话（每轮一对、丢弃 thinking 和工具内容、注入上下文不切轮、`maxTurns`、只追加）；请求策略；路由与错误信封；计费次数与缓存；dismiss；并发与 `busy`；中止；`timeoutMs` 和兜底超时；预生成；子代理排除；卸载清理 |
-| `verify/client.test.mjs` | 用假 DOM 和假 hook 运行时驱动 `client.js`：模块注册、locale/slot、请求格式与静默失败、状态机、切换会话、Tab 接受（只走 `insertText`，从不 submit）、输入法、草稿与运行中隐藏、缓存复显、Esc 关闭、弹层让出 Tab、主题 token 白名单 |
+| `verify/package.test.mjs` | manifest、exports、files 都存在（含中英文 README）；locale、icon；patch 按序重述全部字段且与 `DEFAULTS` 一致；client 的 `CONFIG_FIELDS` 与 Host `FIELDS` 逐项一致、配置页 key 与包名/行 id 一致；`pnpm pack --dry-run` 的内容（没有 pnpm 时跳过） |
+| `verify/host.test.mjs` | 用桩 `ctx` 驱动真实 Host 模块：入口与 `Config` schema、配置解析；`settings.configure({ auto: false })` 的自有页面声明（可选注入）；压缩对话（每轮一对、丢弃 thinking 和工具内容、注入上下文不切轮、只追加）；请求策略；路由与错误信封；计费次数与缓存；dismiss；并发与 `busy`；中止；`timeoutMs` 和兜底超时；子代理排除；卸载清理 |
+| `verify/client.test.mjs` | 用假 DOM 和假 hook 运行时驱动 `client.js`：模块注册、locale/slot、请求格式与静默失败、状态机、切换会话、Tab 接受（只走 `insertText`，从不 submit）、输入法、草稿与运行中隐藏、缓存复显、Esc 关闭、弹层让出 Tab、主题 token 白名单；配置页的 summary/不可用/只读视图、暂存与保存计划（布尔、文本、枚举、数字范围、provider/model 成对、重置、拒绝保留草稿） |
 
-缺口：假 DOM 的 `querySelector` 返回 `null`，ghost 测量和 placeholder 隐藏没有覆盖，需要用 jsdom 补。
+缺口：假 DOM 的 `querySelector` 返回 `null`，ghost 测量和 placeholder 隐藏没有覆盖，需要用 jsdom 补。另一处：消融实验发现把 `host/index.js` 的 `turn/start` 监听整段删掉后 85 个测试仍全绿——它保护的“新回合开始时中止在途生成、停止继续计费”没有回归测试；建议补一条（删除 listener 后 `harness.calls` 应在 turn/start 后不再增长）。
 
 ### 7.3 真机验收
 
@@ -232,6 +245,32 @@ npm run pack:dry  # 查看打包内容
 | 真实预测 | 首轮冷启动 13,119 prompt tokens；第二轮 13,508 prompt tokens，命中缓存 13,056（96.65%），耗时 1.76 s，返回预测 |
 | dismiss | dismiss 后再 wait 返回 `stale` |
 
+2026-10-22，Desktop profile，dsh 0.2.1-rc.2（本地开发构建，未发布）：
+
+| 检查 | 结果 |
+|---|---|
+| `.tgz` 安装（本地开发包） | `application: applied`，`warnings: []` |
+| Client slot 注册 | `Slots.listSubTree` 中 `plugins.row.config` 下有 `dsh-followup-prompt#followup-prompt`，状态 `active`（HMR 直接生效，未刷新页面） |
+| Host 配置 schema | `Config.listConfigs` 仍为 `schema`（9 个 volatile 字段，当次验收时） |
+| 待人工确认 | 行上出现 **配置** 入口；页面能读到 `form`、保存写入 profile patch、重启后保留 |
+
+2026-10-22，Desktop profile，dsh 0.2.1-rc.2（本地开发构建，未发布）：
+
+| 检查 | 结果 |
+|---|---|
+| `.tgz` 安装（本地开发包） | `application: applied`，`warnings: []` |
+| Client slot 注册 | `plugins.row.config` 仍有 active occupant（可选的 `remote.session` 注入没有阻止插件加载） |
+| 待人工确认 | 配置页的模型下拉列出 DSH 已配置的 provider/model；切换模型保存后 profile patch 的 `provider`/`model` 同步更新 |
+
+2026-10-22，Desktop profile，dsh 0.2.1-rc.2（本地开发构建，未升版本；依次删除 `maxTurns` / `prefetchOnTurnEnd` / `enabled` 后）：
+
+| 检查 | 结果 |
+|---|---|
+| remove_bundle + 重装 0.2.3（同一版本） | 两步都 `application: applied`；profile 依赖仍指向同一 tgz |
+| Host 配置 schema | `Config.listConfigs` 为 `schema`，属性只剩 6 个 volatile 字段（`provider`、`model`、`reasoningEffort`、`maxTokens`、`timeoutMs`、`prompt`），已无 `enabled` / `maxTurns` / `prefetchOnTurnEnd` |
+| Client slot 注册 | `plugins.row.config` 下 `dsh-followup-prompt#followup-prompt` 仍为 `active` |
+| 待人工确认 | 配置页只剩 5 行（模型、推理强度、maxTokens、timeoutMs、prompt） |
+
 仍需在页面上人工确认：
 
 1. Tab 与 Lexical、斜杠命令弹层的竞争，以及 `[data-composer-input]` 能否命中；
@@ -242,7 +281,7 @@ npm run pack:dry  # 查看打包内容
 
 ### 7.4 升级回归清单
 
-DSH 升级后逐项核对：slot 名和标准 props；`data-composer-input`/`-placeholder`/`-card` 是否还在；ghost 对齐；`inputActions.captureInsertion`/`insertText` 是否还在；`connection.fetch.register` 的契约；`session.deriveMessages`/`requestHeader`/`snapshotEvents` 的签名。任何一项有变化，先按顺序降级：overlay ghost → `conversation.input.dock` 建议条 → `enabled=false`。
+DSH 升级后逐项核对：slot 名和标准 props；`data-composer-input`/`-placeholder`/`-card` 是否还在；ghost 对齐；`inputActions.captureInsertion`/`insertText` 是否还在；`connection.fetch.register` 的契约；`session.deriveMessages`/`requestHeader`/`snapshotEvents` 的签名。任何一项有变化，先按顺序降级：overlay ghost → `conversation.input.dock` 建议条 → 在插件页关掉插件。
 
 ### 7.5 发布
 
@@ -260,10 +299,11 @@ CI 里没有 Harness，`deps:ci` 从 npm 安装 peer。`dsh-llm` 固定为与基
 
 | 风险 | 缓解 |
 |---|---|
-| 额外计费 | 总开关、按需触发、按回合缓存、并发上限、超时、可改用小模型；README 写明 |
+| 额外计费 | 插件行开关、按需触发、按回合缓存、并发上限、超时、可改用小模型；README 写明 |
 | Client 依赖 0.2.1 私有 DOM 结构，升级后错位 | 常量集中、失败静默、升级回归清单 |
 | `/api` exact Fetch 路由不是稳定的公开 API | `engines` 锁定 0.2.x；随时可以关闭 |
-| 压缩对话信息量不足 | 保留双方完整可见文本；`maxTurns` 控制累积轮数 |
+| 压缩对话信息量不足 | 保留双方完整可见文本 |
+| 压缩对话随会话无限增长（不再有轮数上限） | 只保留可见文本，通常远小于原始历史；超出模型上下文时预测静默失败，不影响主对话，需要时再设计上限 |
 | provider 前缀缓存 TTL 太短 | 退化为每次付全价，但压缩对话很小，成本仍然可控 |
 | 键盘桥是全局单槽，不区分会话 | 只有可见的 ghost 发布 handle；彻底解决需要 slot 帧提供会话身份 |
 | 本地密钥过滤是启发式 | 永不自动发送，用户可以编辑 |
@@ -272,5 +312,4 @@ CI 里没有 Harness，`deps:ci` 从 npm 安装 peer。`dsh-llm` 固定为与基
 
 - **用量可见**：每次预测的 token 和缓存命中目前只写进 debug 日志，用户实际上看不到。可行的做法是：Host 在内存里按会话和全局聚合 usage，新增 `usage/stats` 端点；Client 在 `conversation.composer.dock`（DSH 自带用量胶囊的位置）注册一个胶囊。预测不写会话事件，所以 DSH 自带的 token 统计永远看不到它。
 - **打字后不再请求**：请求进行中用户开始打字，请求会被取消、Host 也会中止生成；之后清空草稿，这一回合不会再请求。要修就得允许取消后重新请求，代价是可能多计费一次。
-- **设置页**：0.2.x 的 `ctx.settings` 不再提供 `register(ns, schema)`。如果需要自定义设置页，由 Host 自己持久化 `$DSH_HOME/followup-prompt.json`，Client 注册 `settings.section` 并通过路由读写。
-- **上游化**：如果要默认内置，迁到 dsh 仓库：Host 改用 `@Remote` + Typert，预测请求记一条只写日志的会话事件以便审计；`ui-conversation` 提供官方的 composer suggestion 扩展点，在 Lexical 的文本原点渲染 ghost，取代插件侧的绝对定位。Host 预测服务和 Client 呈现已经是两个薄层，迁移时只需替换通信和 UI 挂载。
+- **上游化**：如果要默认内置，迁到 dsh 仓库：Host 改用 `@Remote` + Typert，预测请求记一条只写日志的会话事件以便审计；`ui-conversation` 提供官方的 composer suggestion 扩展点，在 Lexical 的文本原点渲染 ghost，取代插件侧的绝对定位；配置页可以变成 `packages/client/ui-settings-*` 之类的 companion 包，注册到 `plugins.item` 并列出在 web-app 的 bundle roster 里。Host 预测服务和 Client 呈现已经是两个薄层，迁移时只需替换通信和 UI 挂载。

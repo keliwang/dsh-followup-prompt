@@ -6,7 +6,7 @@ import { existsSync, readdirSync, readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { test } from 'node:test'
 import { fileURLToPath } from 'node:url'
-import { DEFAULTS } from '../host/config.js'
+import { DEFAULTS, FIELDS } from '../host/config.js'
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..')
 const read = (path) => readFileSync(join(root, path), 'utf8')
@@ -29,6 +29,7 @@ test('manifest: exports, files, and dsh entries resolve on disk', () => {
   for (const pattern of pkg.files) assert.ok(existsPattern(pattern), `files ${pattern} is missing`)
   assert.ok(existsSync(join(root, pkg.dsh.bundle.patch)), 'dsh.bundle.patch is missing')
   assert.equal(pkg.dsh.client.platform, 'web')
+  assert.ok(pkg.dsh.client.inject.includes('@deepseek-ai/dsh-api-remotes'), 'client manifest declares the Remote assembly')
 })
 
 test('locale: en and zh carry meta.title and meta.description', () => {
@@ -73,6 +74,31 @@ test('cordis.patch.yml: one followup-prompt row restating every user field defau
 })
 
 const pnpm = spawnSync('pnpm', ['--version'], { encoding: 'utf8' })
+
+// The browser half cannot import the Host schema, so it restates the field model
+// as JSON. This test is the drift guard between the two sources of truth.
+test('client: the settings page field model mirrors host FIELDS and the row key', () => {
+  const client = read('client.js')
+  const match = client.match(/const CONFIG_FIELDS = Object\.freeze\((\[[\s\S]*?\])\)/)
+  assert.ok(match !== null, 'client.js has no CONFIG_FIELDS declaration')
+  const fields = JSON.parse(match[1])
+  assert.deepEqual(fields.map((field) => field.key), Object.keys(FIELDS), 'field order')
+  for (const [key, field] of Object.entries(FIELDS)) {
+    const declared = fields.find((candidate) => candidate.key === key)
+    assert.ok(declared !== undefined, `client field ${key}`)
+    assert.equal(declared.kind, field.type === 'string' ? 'text' : field.type, `${key}: kind`)
+    if (field.type === 'integer') {
+      assert.equal(declared.min, field.range[0], `${key}: min`)
+      assert.equal(declared.max, field.range[1], `${key}: max`)
+    }
+    if (field.type === 'enum') assert.deepEqual(declared.values, field.values, `${key}: values`)
+    if (field.type === 'string' && field.maxLength !== undefined) {
+      assert.equal(declared.maxLength, field.maxLength, `${key}: maxLength`)
+    }
+  }
+  assert.ok(client.includes("'plugins.row.config'"), 'client registers the row config slot')
+  assert.ok(client.includes(`'${pkg.name}#followup-prompt'`), 'client key matches the package name and patch row id')
+})
 
 test('pack: the tarball ships every declared file and nothing from verify/', { skip: pnpm.status !== 0 && 'pnpm not found' }, () => {
   const result = spawnSync('pnpm', ['pack', '--dry-run'], { cwd: root, encoding: 'utf8', timeout: 180_000 })

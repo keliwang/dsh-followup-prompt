@@ -41,15 +41,13 @@ the Host also ends the poll at `timeoutMs + 2 s`. So a poll never lasts longer t
 
 **Sharing and billing.** Concurrent polls for the same turn share one generation. A poll that
 leaves (client abort) only removes itself; when the last one leaves, the Host cancels the
-generation, unless it was started by `prefetchOnTurnEnd`. Terminal results are cached per turn,
-so polling again does not bill again.
+generation. Terminal results are cached per turn, so polling again does not bill again.
 
 **Null answers.** Every `suggestion: null` means "show nothing"; the Client must not branch on
 `reason`, which exists for logs and tests.
 
 | `reason` | Meaning | Cached for the turn |
 |---|---|---|
-| `disabled` | `enabled` is false; nothing is generated | — |
 | `unknown-session` | No such session, or a subagent session | — |
 | `no-completed-turn` | The session's latest turn is open or did not complete; `turn` is null | — |
 | `busy` | The Host is already running its maximum number of generations | no |
