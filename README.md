@@ -69,6 +69,8 @@ Reopening a finished session also shows the prediction for its last turn.
 
 **What the model receives**: a "condensed transcript". Each turn keeps only your message and the visible text of the model's reply; thinking, tool calls, tool output, and the main conversation's system prompt are left out. Each turn appends just one pair of messages at the end, so the provider's prefix cache builds up turn after turn and most input tokens are billed at the cached rate.
 
+**Sticks to what's in the conversation**: predictions are instructed to use only names, values, and facts that appear in the condensed transcript. They shouldn't make up hostnames, IDs, commands, or results, or say you've already done something (like "restarted it, still failing") that your own messages don't mention. When the natural next message depends on something the model can't see, you get a more general suggestion, or none at all. This is best effort, not a guarantee, so read a prediction before you send it.
+
 **Cost**: every prediction is an ordinary model request billed by your provider. If you don't want it, switch the plugin off on the Plugins page; to spend less, give predictions their own cheaper model (`provider` / `model`).
 
 **Privacy**

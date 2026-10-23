@@ -297,6 +297,18 @@ test('prediction helpers: suggestion normalization and safety filters', () => {
   assert(FOLLOWUP_INSTRUCTION.includes('NO_PREDICTION'), 'instruction sentinel present')
 })
 
+test('instruction: grounding rules forbid invented facts and invented user actions', () => {
+  assert.match(FOLLOWUP_INSTRUCTION, /transcript is your only evidence/i, 'transcript named as the only evidence')
+  assert.match(FOLLOWUP_INSTRUCTION, /Never invent external facts/i, 'invented external facts forbidden')
+  assert.match(FOLLOWUP_INSTRUCTION, /Machine names, hosts, IPs/i, 'the fact classes are enumerated')
+  assert.match(FOLLOWUP_INSTRUCTION, /Do not derive, rename, number, or continue a pattern or list/i, 'series extrapolation forbidden')
+  assert.match(FOLLOWUP_INSTRUCTION, /Never claim the user already did/i, 'invented past user actions forbidden')
+  assert.match(FOLLOWUP_INSTRUCTION, /assistant's proposals are not evidence that the user acted/i, 'assistant proposals are not evidence')
+  assert.match(FOLLOWUP_INSTRUCTION, /Accuracy matters more than specificity/i, 'generic fallback preferred over specificity')
+  assert.match(FOLLOWUP_INSTRUCTION, /check the draft/i, 'self-check before replying')
+  assert.match(PREDICTION_CUE, /never invent/i, 'cue repeats the grounding rule')
+})
+
 test('prediction: the request is a condensed transcript of one pair per turn', () => {
   const messages = [
     { id: 'p-s', role: 'system', source: { kind: 'system-prompt' }, content: [{ type: 'text', text: 'sys' }] },
