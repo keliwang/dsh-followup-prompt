@@ -71,6 +71,8 @@ Reopening a finished session also shows the prediction for its last turn.
 
 **Sticks to what's in the conversation**: predictions are instructed to use only names, values, and facts that appear in the condensed transcript. They shouldn't make up hostnames, IDs, commands, or results, or say you've already done something (like "restarted it, still failing") that your own messages don't mention. When the natural next message depends on something the model can't see, you get a more general suggestion, or none at all. This is best effort, not a guarantee, so read a prediction before you send it.
 
+**Stays on the current step**: a prediction responds to the model's latest reply and tries not to jump ahead to later steps or switch topics. If the reply asks you to do something, the prediction may have you agree or get started, but not report that it's already done. Like the rule above, this is best effort.
+
 **Cost**: every prediction is an ordinary model request billed by your provider. If you don't want it, switch the plugin off on the Plugins page; to spend less, give predictions their own cheaper model (`provider` / `model`).
 
 **Privacy**

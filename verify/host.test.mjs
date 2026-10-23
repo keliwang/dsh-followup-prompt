@@ -309,6 +309,17 @@ test('instruction: grounding rules forbid invented facts and invented user actio
   assert.match(PREDICTION_CUE, /never invent/i, 'cue repeats the grounding rule')
 })
 
+test('instruction: predictions answer the adjacent message instead of skipping ahead', () => {
+  assert.match(FOLLOWUP_INSTRUCTION, /immediate next message/i, 'next message is scoped to immediate')
+  assert.match(FOLLOWUP_INSTRUCTION, /right after the assistant's last message/i, 'adjacency is stated')
+  assert.match(FOLLOWUP_INSTRUCTION, /Do not skip ahead to a later step/i, 'skipping ahead is forbidden')
+  assert.match(FOLLOWUP_INSTRUCTION, /Do not predict what comes after the step is done/i, 'post-step predictions are forbidden')
+  assert.match(FOLLOWUP_INSTRUCTION, /Accepting or committing to a concrete step/i, 'immediate acceptance is allowed')
+  assert.match(FOLLOWUP_INSTRUCTION, /not a question about a later step|do not jump to a later step/i, 'unknown-action fallback stays on the current step')
+  assert.match(FOLLOWUP_INSTRUCTION, /same step rather than a later one/i, 'self-check enforces adjacency')
+  assert.match(PREDICTION_CUE, /immediate response/i, 'cue repeats the adjacency rule')
+})
+
 test('prediction: the request is a condensed transcript of one pair per turn', () => {
   const messages = [
     { id: 'p-s', role: 'system', source: { kind: 'system-prompt' }, content: [{ type: 'text', text: 'sys' }] },
