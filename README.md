@@ -65,15 +65,13 @@ Reopening a finished session also shows the prediction for its last turn.
 
 ## How it works
 
-**When the model is called**: only while you are looking at a session whose turn has finished and the composer is empty. The result stays in memory until the next turn starts, so viewing it again is not billed again. Interrupted or failed turns, empty sessions, and subagent sessions are never predicted for.
+**What gets sent**: your messages and the visible text of the model's replies in this session. Thinking, tool calls, tool output, and the system prompt are left out.
 
-**What the model receives**: a "condensed transcript". Each turn keeps only your message and the visible text of the model's reply; thinking, tool calls, tool output, and the main conversation's system prompt are left out. Each turn appends just one pair of messages at the end, so the provider's prefix cache builds up turn after turn and most input tokens are billed at the cached rate.
+**When it runs**: only when a turn has finished and you're looking at the session with an empty composer. The result is kept until the next turn starts, so viewing it again isn't billed again. Interrupted or failed turns, empty sessions, and subagent sessions are skipped.
 
-**Sticks to what's in the conversation**: predictions are instructed to use only names, values, and facts that appear in the condensed transcript, so they shouldn't make up hostnames, IDs, commands, or results. If the model just asked you to do something, or you said you would, a prediction may assume it's done (like "Logged in, go ahead"). It won't claim you did anything else, or add results nobody mentioned (like "…and it's still failing"). When the natural next message depends on something the model can't see, you get a more general suggestion, or none at all. This is best effort, not a guarantee, so read a prediction before you send it.
+**What it predicts**: a short reply to the model's latest message, based only on what's in the conversation. When there's nothing worth sending, like a plain "OK" or "thanks", or the next message depends on something only you know, such as a test result, no prediction appears. Predictions can still be wrong, so read one before you send it.
 
-**Stays on the current step**: a prediction responds to the model's latest reply and tries not to jump ahead to later steps or switch topics. It also has to give the model something to act on right away: an answer, a decision, a question, or a request. Messages that would only leave the model waiting, like "OK", "thanks", or "I'll test it and get back to you", don't get a prediction. Like the rule above, this is best effort.
-
-**Cost**: every prediction is an ordinary model request billed by your provider. If you don't want it, switch the plugin off on the Plugins page; to spend less, give predictions their own cheaper model (`provider` / `model`).
+**Cost**: every prediction is an ordinary model request billed by your provider; with providers that support prompt caching, most of the input is billed at the cached rate. To spend less, pick a cheaper model for predictions in the settings; to stop entirely, switch the plugin off on the Plugins page.
 
 **Privacy**
 

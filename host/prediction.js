@@ -8,7 +8,7 @@
 
 import { BlockAssembler, createAssistantMessage, createUserMessage } from '@deepseek-ai/dsh-llm'
 
-const PROMPT_VERSION = 12
+const PROMPT_VERSION = 13
 
 // Organised as three invariants (useful, adjacent, grounded) instead of one
 // exception per observed failure, so every rule has a single home and is stated
@@ -21,10 +21,10 @@ export const FOLLOWUP_INSTRUCTION = [
   'A prediction must pass all three checks:',
   "- Useful: the user sends messages to make the assistant do something, not merely to report status. The message must give the assistant something it can act on, answer or decide now. Never predict a message the assistant could only acknowledge or wait on: thanks, goodbyes, status updates, promises to report back, or plans that schedule the assistant's work for after the user finishes something.",
   "- Adjacent: respond to the assistant's last message, on its step and topic. Never skip ahead to a later step, a later topic or an open thread from an earlier turn, and never predict what the user would do after a step the assistant just asked for.",
-  '- Grounded: use only names, values and facts that appear in the transcript. Never invent external specifics such as machine names, hosts, services, paths, commands, error text, IDs, dates or observations, and never derive, rename, number or continue a pattern or list (if one machine appears, do not predict a second machine name). You may report as done a step the assistant asked or recommended that the user do, or one the user said they would do; never a step the assistant only speculated about, and never with results beyond the step being done. Inferring what the user wants is fine; inventing a fact to support it is not.',
+  '- Grounded: use only names, values and facts that appear in the transcript. Never invent external specifics such as machine names, hosts, services, paths, commands, error text, IDs, dates or observations, and never derive, rename, number or continue a pattern or list (if one machine appears, do not predict a second machine name). You may report as done a step the assistant asked or recommended that the user do, or one the user said they would do, when finishing it is all the assistant needs to know (logging in, publishing, approving); never a step the assistant only speculated about. When the assistant needs the step\'s outcome (testing, trying, checking, reproducing, reporting what happened), that outcome is unknown: do not report it, guess it, or raise it as a hypothetical ("if it turns out…"). Inferring what the user wants is fine; inventing a fact to support it is not.',
   'Prefer, in order:',
   "- the user's answer or choice if the assistant ended with a question or an offer;",
-  '- if the assistant asked the user to do a step or report back, a reply about that step: reporting it done together with the next request, or a question about it;',
+  '- if the assistant asked the user to do a step, a reply about that step: reporting it done together with the next request when finishing it is enough, or a question about how to do it; if only its outcome would be worth sending, no message passes the checks;',
   '- otherwise the next request, instruction or decision that moves the current step forward.',
   'Before replying, check the draft against all three checks. Accuracy matters more than specificity: if it fails, leave out the unsupported fact (no placeholders like <name> or X), generalize it, or move it one step closer.',
   'Reply with ONLY the predicted message text, in the language the user has been using: one short message, no quotes, labels, markdown fences, or explanations.',
